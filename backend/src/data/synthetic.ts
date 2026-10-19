@@ -1,5 +1,7 @@
 // ข้อมูลจำลองสำหรับเดโม — ไม่ใช่ข้อมูลเกษตรกรหรือราคาจริง
-// ราคาตั้งให้อยู่ในช่วงที่สมเหตุสมผล แต่ไม่ได้อ้างอิงราคาตลาด ณ วันใดวันหนึ่ง
+// ราคาขั้นต่ำของข้าวและมันสำปะหลังตั้งให้ใกล้ราคาอ้างอิงจริงจาก NABC (19 ต.ค. 2569):
+//   ข้าวเปลือกหอมมะลิ 105 ≈ 14.40–18.33 บาท/กก. (ร้อยเอ็ด 17.80), มันสำปะหลังสด ≈ 3.65–4.30 บาท/กก.
+// มะระไม่มีใน NABC → ราคาจำลองทั้งหมด
 
 import type { Crop, Farmer, Listing } from '../core/types.js';
 
@@ -26,14 +28,14 @@ export const farmers: Farmer[] = [
 ];
 
 export const listings: Listing[] = [
-  { id: 'L01', farmerId: 'F01', crop: 'rice_hommali', grade: 'A', quantityKg: 12_000, harvestDate: '2026-11-10', deliveryDate: '2026-11-20', floorPricePerKg: 13.2 },
-  { id: 'L02', farmerId: 'F02', crop: 'rice_hommali', grade: 'A', quantityKg: 8_500, harvestDate: '2026-11-12', deliveryDate: '2026-11-21', floorPricePerKg: 13.0 },
-  { id: 'L03', farmerId: 'F03', crop: 'rice_hommali', grade: 'A', quantityKg: 15_000, harvestDate: '2026-11-14', deliveryDate: '2026-11-22', floorPricePerKg: 13.5 },
-  { id: 'L04', farmerId: 'F04', crop: 'rice_hommali', grade: 'A', quantityKg: 6_000, harvestDate: '2026-11-15', deliveryDate: '2026-11-24', floorPricePerKg: 12.8 },
-  { id: 'L05', farmerId: 'F05', crop: 'rice_hommali', grade: 'B', quantityKg: 9_000, harvestDate: '2026-11-11', deliveryDate: '2026-11-20', floorPricePerKg: 12.0 },
+  { id: 'L01', farmerId: 'F01', crop: 'rice_hommali', grade: 'A', quantityKg: 12_000, harvestDate: '2026-11-10', deliveryDate: '2026-11-20', floorPricePerKg: 16.8 },
+  { id: 'L02', farmerId: 'F02', crop: 'rice_hommali', grade: 'A', quantityKg: 8_500, harvestDate: '2026-11-12', deliveryDate: '2026-11-21', floorPricePerKg: 16.5 },
+  { id: 'L03', farmerId: 'F03', crop: 'rice_hommali', grade: 'A', quantityKg: 15_000, harvestDate: '2026-11-14', deliveryDate: '2026-11-22', floorPricePerKg: 17.0 },
+  { id: 'L04', farmerId: 'F04', crop: 'rice_hommali', grade: 'A', quantityKg: 6_000, harvestDate: '2026-11-15', deliveryDate: '2026-11-24', floorPricePerKg: 16.2 },
+  { id: 'L05', farmerId: 'F05', crop: 'rice_hommali', grade: 'B', quantityKg: 9_000, harvestDate: '2026-11-11', deliveryDate: '2026-11-20', floorPricePerKg: 15.5 },
   { id: 'L06', farmerId: 'F06', crop: 'bitter_gourd', grade: 'A', quantityKg: 1_800, harvestDate: '2026-10-28', deliveryDate: '2026-10-29', floorPricePerKg: 18.0 },
   { id: 'L07', farmerId: 'F07', crop: 'bitter_gourd', grade: 'A', quantityKg: 2_200, harvestDate: '2026-10-28', deliveryDate: '2026-10-30', floorPricePerKg: 17.5 },
   { id: 'L08', farmerId: 'F08', crop: 'bitter_gourd', grade: 'A', quantityKg: 1_500, harvestDate: '2026-10-29', deliveryDate: '2026-10-30', floorPricePerKg: 19.0 },
-  { id: 'L09', farmerId: 'F09', crop: 'cassava', grade: 'A', quantityKg: 25_000, harvestDate: '2026-12-05', deliveryDate: '2026-12-08', floorPricePerKg: 2.6 },
-  { id: 'L10', farmerId: 'F10', crop: 'cassava', grade: 'A', quantityKg: 30_000, harvestDate: '2026-12-06', deliveryDate: '2026-12-09', floorPricePerKg: 2.5 },
+  { id: 'L09', farmerId: 'F09', crop: 'cassava', grade: 'A', quantityKg: 25_000, harvestDate: '2026-12-05', deliveryDate: '2026-12-08', floorPricePerKg: 3.7 },
+  { id: 'L10', farmerId: 'F10', crop: 'cassava', grade: 'A', quantityKg: 30_000, harvestDate: '2026-12-06', deliveryDate: '2026-12-09', floorPricePerKg: 3.6 },
 ];

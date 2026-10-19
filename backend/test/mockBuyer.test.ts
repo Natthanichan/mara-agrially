@@ -28,65 +28,65 @@ describe('Mock Buyer API', () => {
     const run = () => {
       const api = new MockBuyerApi();
       const q = api.requestQuote('B-A', rice);
-      return [q, api.submitCounter(q.sessionId, { pricePerKg: 14.5 }), api.submitCounter(q.sessionId, { pricePerKg: 14.2 })];
+      return [q, api.submitCounter(q.sessionId, { pricePerKg: 18.5 }), api.submitCounter(q.sessionId, { pricePerKg: 18.2 })];
     };
     expect(run()).toEqual(run());
   });
 
-  it('กดราคาแรง: ขยับทีละ 0.15 แล้วยื่นข้อเสนอสุดท้าย และถอนตัวเมื่อเกินรอบ', () => {
+  it('กดราคาแรง: ขยับทีละ 0.20 แล้วยื่นข้อเสนอสุดท้าย และถอนตัวเมื่อเกินรอบ', () => {
     const api = new MockBuyerApi();
     const q = api.requestQuote('B-A', rice);
-    expect(q.pricePerKg).toBe(12.6);
+    expect(q.pricePerKg).toBe(15.8);
     const prices: number[] = [];
     let last = q;
     for (let i = 0; i < 6; i++) {
-      last = api.submitCounter(q.sessionId, { pricePerKg: 14.5 });
+      last = api.submitCounter(q.sessionId, { pricePerKg: 18.5 });
       prices.push(last.pricePerKg);
     }
-    expect(prices).toEqual([12.75, 12.9, 13.05, 13.2, 13.35, 13.5]);
+    expect(prices).toEqual([16, 16.2, 16.4, 16.6, 16.8, 17]);
     expect(last.decision).toBe('final_offer');
-    expect(api.submitCounter(q.sessionId, { pricePerKg: 14.5 }).decision).toBe('walk_away');
-    expect(() => api.submitCounter(q.sessionId, { pricePerKg: 14.5 })).toThrow(MockBuyerError);
+    expect(api.submitCounter(q.sessionId, { pricePerKg: 18.5 }).decision).toBe('walk_away');
+    expect(() => api.submitCounter(q.sessionId, { pricePerKg: 18.5 })).toThrow(MockBuyerError);
   });
 
   it('กลางๆ: ขยับครึ่งหนึ่งของช่องว่าง ไม่เกินราคาสูงสุดที่ยอมจ่าย แล้วตกลงได้', () => {
     const api = new MockBuyerApi();
     const q = api.requestQuote('B-B', rice);
-    expect(api.submitCounter(q.sessionId, { pricePerKg: 14.6 })).toMatchObject({ decision: 'counter', pricePerKg: 14.1 });
-    expect(api.submitCounter(q.sessionId, { pricePerKg: 14.6 })).toMatchObject({ decision: 'counter', pricePerKg: 14.35 });
-    expect(api.submitCounter(q.sessionId, { pricePerKg: 14.6 })).toMatchObject({ decision: 'final_offer', pricePerKg: 14.4 });
-    expect(api.submitCounter(q.sessionId, { pricePerKg: 14.4 })).toMatchObject({ decision: 'accept', pricePerKg: 14.4 });
+    expect(api.submitCounter(q.sessionId, { pricePerKg: 18.4 })).toMatchObject({ decision: 'counter', pricePerKg: 17.7 });
+    expect(api.submitCounter(q.sessionId, { pricePerKg: 18.4 })).toMatchObject({ decision: 'final_offer', pricePerKg: 18 });
+    expect(api.submitCounter(q.sessionId, { pricePerKg: 18 })).toMatchObject({ decision: 'accept', pricePerKg: 18 });
   });
 
   it('รับราคาที่ขอ เมื่อห่างจากราคาที่ตั้งใจขยับไม่เกิน 0.05', () => {
     const api = new MockBuyerApi();
     const q = api.requestQuote('B-B', rice);
-    api.submitCounter(q.sessionId, { pricePerKg: 14.6 }); // 14.10
-    api.submitCounter(q.sessionId, { pricePerKg: 14.6 }); // 14.35
-    expect(api.submitCounter(q.sessionId, { pricePerKg: 14.4 })).toMatchObject({ decision: 'accept', pricePerKg: 14.4 });
+    api.submitCounter(q.sessionId, { pricePerKg: 18.4 }); // 17.70
+    // ผู้ซื้อจะขยับไป 17.75 → ขอ 17.80 ห่าง 0.05 พอดี (กันบั๊ก floating point: 17.8 − 17.75 ≠ 0.05)
+    expect(api.submitCounter(q.sessionId, { pricePerKg: 17.8 })).toMatchObject({ decision: 'accept', pricePerKg: 17.8 });
   });
 
   it('ซ่อนค่าหักความชื้น: ราคาหน้าสูงสุด แต่ราคาสุทธิต่ำกว่าเจ้าอื่น', () => {
     const api = new MockBuyerApi();
     const c = api.requestQuote('B-C', rice);
     const b = api.requestQuote('B-B', rice);
-    expect(c.pricePerKg).toBeGreaterThan(b.pricePerKg); // 14.60 > 13.60
+    expect(c.pricePerKg).toBeGreaterThan(b.pricePerKg); // 18.40 > 17.00
     expect(c.deductions).toEqual([{ kind: 'percent', label: 'หักความชื้น', percent: 4 }]);
-    expect(netOf(c.pricePerKg, c.deductions)).toBe(14.01); // 14.60 − 4%
-    // ขณะที่ B ตกลงได้ 14.40 ไม่มีส่วนหัก → C แย่กว่าจริง
-    expect(netOf(14.4, [])).toBeGreaterThan(netOf(c.pricePerKg, c.deductions));
+    expect(netOf(c.pricePerKg, c.deductions)).toBe(17.66); // 18.40 − 4%
+    // ขณะที่ B ตกลงได้ 18.00 ไม่มีส่วนหัก → C แย่กว่าจริง
+    expect(netOf(18, [])).toBeGreaterThan(netOf(c.pricePerKg, c.deductions));
   });
 
   it('ต่อรองค่าหักความชื้นได้ครั้งเดียว และราคาไม่ขยับในรอบนั้น', () => {
     const api = new MockBuyerApi();
     const q = api.requestQuote('B-C', rice);
-    const r1 = api.submitCounter(q.sessionId, { pricePerKg: 14.8, contestDeductions: ['หักความชื้น'] });
-    expect(r1).toMatchObject({ decision: 'counter', pricePerKg: 14.6 });
+    const r1 = api.submitCounter(q.sessionId, { pricePerKg: 18.6, contestDeductions: ['หักความชื้น'] });
+    expect(r1).toMatchObject({ decision: 'counter', pricePerKg: 18.4 });
     expect(r1.deductions[0]).toMatchObject({ percent: 1.5 });
-    expect(netOf(r1.pricePerKg, r1.deductions)).toBe(14.38);
-    const r2 = api.submitCounter(q.sessionId, { pricePerKg: 14.8, contestDeductions: ['หักความชื้น'] });
+    // หลังต่อรองค่าหัก C ให้สุทธิ 18.12 > B 18.00 → การต่อรองค่าหักคุ้มกว่าต่อรองราคา
+    expect(netOf(r1.pricePerKg, r1.deductions)).toBe(18.12);
+    const r2 = api.submitCounter(q.sessionId, { pricePerKg: 18.6, contestDeductions: ['หักความชื้น'] });
     expect(r2.deductions[0]).toMatchObject({ percent: 1.5 }); // ไม่ลดซ้ำ
-    expect(r2.pricePerKg).toBe(14.65);
+    expect(r2.pricePerKg).toBe(18.45);
   });
 
   it('ไม่ยอมจ่ายเกินราคาสูงสุดของผู้ซื้อ ไม่ว่าจะเจรจากี่รอบ', () => {
@@ -94,14 +94,14 @@ describe('Mock Buyer API', () => {
     const q = api.requestQuote('B-A', rice);
     let last = q;
     for (let i = 0; i < 6; i++) last = api.submitCounter(q.sessionId, { pricePerKg: 99 });
-    expect(last.pricePerKg).toBeLessThanOrEqual(14.0);
+    expect(last.pricePerKg).toBeLessThanOrEqual(17.6);
   });
 
   it('privacy: ปฏิเสธ request ที่มีราคาขั้นต่ำของเกษตรกรหลุดมา', () => {
     const api = new MockBuyerApi();
-    expect(() => api.requestQuote('B-A', { ...rice, floorPricePerKg: 13 } as QuoteRequest)).toThrow(/ข้อมูลส่วนตัว/);
+    expect(() => api.requestQuote('B-A', { ...rice, floorPricePerKg: 17 } as QuoteRequest)).toThrow(/ข้อมูลส่วนตัว/);
     const q = api.requestQuote('B-A', rice);
-    expect(() => api.submitCounter(q.sessionId, { pricePerKg: 14, meta: { minPrice: 13 } } as never)).toThrow(/ข้อมูลส่วนตัว/);
+    expect(() => api.submitCounter(q.sessionId, { pricePerKg: 18, meta: { minPrice: 17 } } as never)).toThrow(/ข้อมูลส่วนตัว/);
   });
 
   it('ตรวจข้อมูลไม่ถูกต้อง', () => {
@@ -110,6 +110,6 @@ describe('Mock Buyer API', () => {
     expect(() => api.requestQuote('B-A', { ...rice, quantityKg: 5_000 })).toThrow(MockBuyerError);
     const q = api.requestQuote('B-A', rice);
     expect(() => api.submitCounter(q.sessionId, { pricePerKg: Number.NaN })).toThrow(MockBuyerError);
-    expect(() => api.submitCounter('nope', { pricePerKg: 14 })).toThrow(MockBuyerError);
+    expect(() => api.submitCounter('nope', { pricePerKg: 18 })).toThrow(MockBuyerError);
   });
 });

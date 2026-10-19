@@ -1,0 +1,169 @@
+{
+ "_note": "บางส่วนของข้อมูลจริงจาก https://agriapi.nabc.go.th/api/daily-prices/date?date=2026-10-19&page=1 (ทั้งหมด 55 แถว เลือกมา 13 แถว) — ใช้ในเทสเท่านั้น",
+ "success": true,
+ "data": [
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "กุ้งขาว",
+   "product_name": "กุ้งขาวแวนนาไม ขนาด 70 ตัว/กก.",
+   "market_name": "ตลาดกลางกุ้งสมุทรสาคร",
+   "province": "สมุทรสาคร",
+   "day_price": 140,
+   "unit": "บาท/กก."
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "ข้าวหอมมะลิ",
+   "product_name": "ข้าวเปลือกเจ้าหอมมะลิ 105",
+   "market_name": "ท่าข้าว ธ.ก.ส.",
+   "province": "ขอนแก่น",
+   "day_price": 17000,
+   "unit": "บาท/ตัน"
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "ข้าวหอมมะลิ",
+   "product_name": "ข้าวเปลือกเจ้าหอมมะลิ 105",
+   "market_name": "โรงสีกิจทวียโสธร",
+   "province": "ยโสธร",
+   "day_price": 14400,
+   "unit": "บาท/ตัน"
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "ข้าวหอมมะลิ",
+   "product_name": "ข้าวเปลือกเจ้าหอมมะลิ 105",
+   "market_name": "โรงสีราษีพาณิชย์ศรีสะเกษ",
+   "province": "ศรีสะเกษ",
+   "day_price": 17500,
+   "unit": "บาท/ตัน"
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "ข้าวหอมมะลิ",
+   "product_name": "ข้าวเปลือกเจ้าหอมมะลิ 105",
+   "market_name": "โรงสีสหกรณ์การเกษตรสุวรรณภูมิ",
+   "province": "ร้อยเอ็ด",
+   "day_price": 17800,
+   "unit": "บาท/ตัน"
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "ข้าวหอมมะลิ",
+   "product_name": "ข้าวเปลือกเจ้าหอมมะลิ 105",
+   "market_name": "โรงสีสหพัฒนา",
+   "province": "บุรีรัมย์",
+   "day_price": 18000,
+   "unit": "บาท/ตัน"
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "ข้าวหอมมะลิ",
+   "product_name": "ข้าวเปลือกเจ้าหอมมะลิ 105",
+   "market_name": "โรงสีไฟไทยเจริญวัฒนา",
+   "province": "อำนาจเจริญ",
+   "day_price": 18333,
+   "unit": "บาท/ตัน"
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "มันสำปะหลัง",
+   "product_name": "หัวมันสำปะหลังสด (แป้ง 25%)",
+   "market_name": "บริษัท ชลเจริญ จำกัด",
+   "province": "ชลบุรี",
+   "day_price": 3.65,
+   "unit": "บาท/กก."
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "มันสำปะหลัง",
+   "product_name": "หัวมันสำปะหลังสด (แป้ง 25%)",
+   "market_name": "บริษัท สงวนวงษ์อุตสาหกรรม จำกัด",
+   "province": "นครราชสีมา",
+   "day_price": 4,
+   "unit": "บาท/กก."
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "มันสำปะหลัง",
+   "product_name": "หัวมันสำปะหลังสด (แป้ง 25%)",
+   "market_name": "บริษัท โชคยืนยงอุตสาหกรรม จำกัด",
+   "province": "นครราชสีมา",
+   "day_price": 4,
+   "unit": "บาท/กก."
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "มันสำปะหลัง",
+   "product_name": "หัวมันสำปะหลังสด (แป้ง 30%)",
+   "market_name": "บริษัท ชลเจริญ จำกัด",
+   "province": "ชลบุรี",
+   "day_price": 3.9,
+   "unit": "บาท/กก."
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "มันสำปะหลัง",
+   "product_name": "หัวมันสำปะหลังสด (แป้ง 30%)",
+   "market_name": "บริษัท สงวนวงษ์อุตสาหกรรม จำกัด",
+   "province": "นครราชสีมา",
+   "day_price": 4.25,
+   "unit": "บาท/กก."
+  },
+  {
+   "data_date": "2026-10-19",
+   "day": 19,
+   "month": 10,
+   "year_th": 2569,
+   "product_category": "มันสำปะหลัง",
+   "product_name": "หัวมันสำปะหลังสด (แป้ง 30%)",
+   "market_name": "บริษัท สำปะหลังพัฒนา จำกัด",
+   "province": "ระยอง",
+   "day_price": 4.3,
+   "unit": "บาท/กก."
+  }
+ ],
+ "pagination": {
+  "limit": 100,
+  "offset": 0,
+  "page": 1,
+  "count": 13,
+  "total": 13
+ }
+}

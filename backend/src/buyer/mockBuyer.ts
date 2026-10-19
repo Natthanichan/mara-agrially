@@ -1,4 +1,5 @@
 // Mock Buyer API — ผู้ซื้อจำลองสำหรับเดโมและเทส (ไม่ใช่ผู้ซื้อจริง)
+// ราคาข้าว/มันสำปะหลังตั้งให้ใกล้ราคาอ้างอิง NABC (19 ต.ค. 2569); ราคามะระเป็นค่าจำลอง
 //
 // Deterministic: ข้อเสนอเดิม → คำตอบเดิมทุกครั้ง (ไม่มีการสุ่ม)
 // ผู้ซื้อมี "ราคาสูงสุดที่ยอมจ่าย" (reservation) เป็นความลับของฝั่งผู้ซื้อ
@@ -48,10 +49,10 @@ const BUYERS: BuyerConfig[] = [
     maxKg: 200_000,
     paymentTermDays: 7,
     maxRounds: 6,
-    stepPerKg: 0.15,
+    stepPerKg: 0.2,
     books: {
-      rice_hommali: { A: { openingPerKg: 12.6, reservationPerKg: 14.0, deductions: [] } },
-      cassava: { A: { openingPerKg: 2.4, reservationPerKg: 3.0, deductions: [] } },
+      rice_hommali: { A: { openingPerKg: 15.8, reservationPerKg: 17.6, deductions: [] } },
+      cassava: { A: { openingPerKg: 3.4, reservationPerKg: 4.1, deductions: [] } },
     },
   },
   {
@@ -66,7 +67,7 @@ const BUYERS: BuyerConfig[] = [
     maxRounds: 4,
     concedeRatio: 0.5,
     books: {
-      rice_hommali: { A: { openingPerKg: 13.6, reservationPerKg: 14.4, deductions: [] } },
+      rice_hommali: { A: { openingPerKg: 17.0, reservationPerKg: 18.0, deductions: [] } },
     },
   },
   {
@@ -98,7 +99,7 @@ const BUYERS: BuyerConfig[] = [
     moistureFloorPercent: 1.5,
     books: {
       rice_hommali: {
-        A: { openingPerKg: 14.6, reservationPerKg: 14.8, deductions: [{ kind: 'percent', label: MOISTURE, percent: 4 }] },
+        A: { openingPerKg: 18.4, reservationPerKg: 18.6, deductions: [{ kind: 'percent', label: MOISTURE, percent: 4 }] },
       },
     },
   },
@@ -267,7 +268,7 @@ export class MockBuyerApi {
     next = r2(Math.min(next, book.reservationPerKg));
 
     // ขอมาใกล้ราคาที่ผู้ซื้อจะขยับไปอยู่แล้ว (ห่างไม่เกิน 0.05) และไม่เกิน reservation → รับราคาที่ขอ
-    if (ask <= book.reservationPerKg && ask - next <= 0.05) {
+    if (ask <= book.reservationPerKg && r2(ask - next) <= 0.05) {
       s.currentPerKg = ask;
       s.closed = true;
       return this.respond(s, 'accept', `ตกลงที่ ${ask.toFixed(2)} บาท/กก.${deductionNote}${this.deductionNote(s)}`);
