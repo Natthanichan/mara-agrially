@@ -10,7 +10,7 @@
 - [x] ขั้นที่ 2 Deterministic engine + unit test
 - [x] ขั้นที่ 3 Mock Buyer API (ผู้ซื้อจำลอง 4 ราย: กดราคา, กลางๆ, ซ่อนค่าหักความชื้น, ค้าส่งผัก)
 - [x] ขั้นที่ 3.5 ราคาตลาดจริงจาก NABC + RAG (custom chunking, BM25 + bigram, รองรับ embedding ภายหลัง)
-- [ ] ขั้นที่ 4 Agent loop (LLM + tool calling)
+- [x] ขั้นที่ 4 Agent loop (Nova บน Bedrock หรือ LLM จำลอง + tool calling + guardrails)
 - [ ] ขั้นที่ 5 อนุมัติ/ปฏิเสธ/เจรจาใหม่ + ledger
 - [ ] ขั้นที่ 6 Web UI (ภาษาไทย)
 - [ ] ขั้นที่ 7 Deploy AWS `ap-southeast-1` Singapore (ต้องขออนุมัติทีมก่อน)
@@ -40,6 +40,30 @@
 - **ค้นหา:** BM25 บน character bigram (ภาษาไทยไม่เว้นวรรค จึงไม่ต้องใช้พจนานุกรมตัดคำ) ไม่ต้องใช้ AWS ผลเหมือนเดิมทุกครั้ง
 - **Hybrid:** ถ้ามี embedding model ใน region จะรวมคะแนนความหมาย ถ้าล่มหรือช้าเกิน timeout กลับไปใช้ lexical อัตโนมัติ
 - เพิ่มความรู้: เพิ่มไฟล์ `.md` ใน `backend/knowledge/` ไม่ต้องแก้โค้ด
+
+## Agent (`backend/src/agent`)
+วงจร: **วางแผน → เรียก tool → ดูคำตอบผู้ซื้อ → ประเมินใหม่ → ทำซ้ำ** จนได้ดีลรออนุมัติ หรือส่งเรื่องให้กลุ่ม
+
+| Tool | ทำอะไร |
+|---|---|
+| `get_market_price` | ราคาจริงจาก NABC |
+| `search_knowledge` | RAG: ประวัติผู้ซื้อ กติกาหักความชื้น แนวทางเจรจา |
+| `list_buyers` / `request_quote` | หาผู้ซื้อ ขอใบเสนอราคา |
+| `evaluate_offer` | ราคาสุทธิหลังค่าขนส่ง+ส่วนหัก และตรวจ floor ทุกคน (โค้ดคำนวณ ไม่ใช่ LLM) |
+| `submit_counter` | ยื่นข้อเสนอโต้กลับ / ขอลดส่วนหัก |
+| `prepare_deal_for_approval` | เตรียมดีลให้เกษตรกรอนุมัติ (ไม่มี tool ปิดดีล) |
+| `escalate_to_farmers` | ส่งเรื่องให้กลุ่มเมื่อไม่มีข้อเสนอผ่าน floor |
+
+**Guardrails (บังคับในโค้ด):** ราคาต่ำกว่า floor · ข้อความมีตัวเลขขั้นต่ำ · เสนอต่ำกว่าที่ผู้ซื้อให้อยู่แล้ว · เกินจำนวนรอบต่อผู้ซื้อ · เตรียมดีลที่ไม่ผ่าน floor → บล็อกและบันทึก `guardrail_blocked`
+**ขีดจำกัด:** 14 ขั้น, LLM timeout 20 วิ, retry 1 ครั้ง, งบ token ต่อการเจรจา — LLM ล่มแล้วหยุดอย่างปลอดภัย ไม่มีดีลค้าง
+
+```bash
+cd backend
+NABC_OFFLINE=1 npm run agent:demo                 # LLM จำลอง + ราคาตัวอย่าง (ไม่มีค่าใช้จ่าย)
+NABC_OFFLINE=1 npm run agent:demo -- bitter_gourd # กรณีส่งเรื่องให้กลุ่ม
+LLM_PROVIDER=bedrock BEDROCK_MODEL_ID=<จาก console> AWS_REGION=ap-southeast-1 npm run agent:demo   # Nova จริง
+```
+ผลทดสอบ (LLM จำลอง, ข้อมูลจำลอง + ราคา NABC 19 ต.ค.): ข้าว 41.5 ตัน → เลือกโรงสี C หลังต่อรองหักความชื้น 4%→1.5% ราคาสุทธิเฉลี่ย 17.91 บาท/กก. สูงกว่าข้อเสนอแรกที่ดีที่สุด +0.61 บาท/กก. (≈25,315 บาททั้งกลุ่ม) — *เป็นผลทดสอบจากข้อมูลจำลอง ไม่ใช่ผลจริงในตลาด*
 
 ## รันในเครื่อง
 ```bash
