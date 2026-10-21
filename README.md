@@ -12,7 +12,7 @@
 - [x] ขั้นที่ 3.5 ราคาตลาดจริงจาก NABC + RAG (custom chunking, BM25 + bigram, รองรับ embedding ภายหลัง)
 - [x] ขั้นที่ 4 Agent loop (Nova บน Bedrock หรือ LLM จำลอง + tool calling + guardrails)
 - [ ] ขั้นที่ 5 อนุมัติ/ปฏิเสธ/เจรจาใหม่ + ledger
-- [ ] ขั้นที่ 6 Web UI (ภาษาไทย)
+- [x] ขั้นที่ 6 (เวอร์ชันเดโม) หน้าเล่นซ้ำการเจรจา `web/index.html` — สร้างจากผลรันจริงด้วย `npm run demo:export`
 - [ ] ขั้นที่ 7 Deploy AWS `ap-southeast-1` Singapore (ต้องขออนุมัติทีมก่อน)
 - [ ] ขั้นที่ 8 LINE OA adapter
 

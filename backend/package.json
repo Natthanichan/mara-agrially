@@ -9,7 +9,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "agent:demo": "tsx scripts/demo.ts"
+    "agent:demo": "tsx scripts/demo.ts",
+    "demo:export": "tsx scripts/export-demo.ts"
   },
   "keywords": [],
   "author": "",
