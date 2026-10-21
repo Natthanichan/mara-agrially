@@ -12,7 +12,7 @@ Parameters:
     Description: bedrock = Amazon Nova, mock = rule-based fallback (no Bedrock cost)
   BedrockModelId:
     Type: String
-    Default: apac.amazon.nova-2-lite-v1:0
+    Default: global.amazon.nova-2-lite-v1:0
     Description: Nova model ID or inference profile ID shown in the Bedrock console (ap-southeast-1)
   DailyNegotiationLimit:
     Type: Number
