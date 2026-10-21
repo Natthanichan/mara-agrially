@@ -35,7 +35,8 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
-body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); }
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); margin: 0; }
+[hidden] { display: none !important; }
 .wrap { max-width: 1180px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 48px; }
 h1, h2, h3 { font-family: var(--display); line-height: 1.25; margin: 0; text-wrap: balance; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -136,6 +137,8 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
 .statusline span b { font-weight: 600; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .actions button { border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 6px 12px; border-radius: 8px; font-size: 14px; }
+.live { margin-bottom: 20px; border-color: var(--accent); }
+.live select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
 .foot { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; display: grid; gap: 4px; }
 </style>
 
@@ -153,6 +156,16 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
     <button class="play" id="playBtn" type="button">เล่นการเจรจาทีละขั้น</button>
     <button class="play secondary" id="allBtn" type="button" hidden>แสดงทั้งหมด</button>
   </div>
+
+  <section class="panel live" id="liveBar" hidden>
+    <div class="row" style="gap:10px 16px">
+      <b>เจรจาสดบน AWS</b>
+      <label class="small" for="liveCrop">พืช</label>
+      <select id="liveCrop"><option value="rice_hommali">ข้าวหอมมะลิ · ร้อยเอ็ด</option><option value="cassava">มันสำปะหลัง · นครราชสีมา</option><option value="bitter_gourd">มะระจีน · ราชบุรี</option></select>
+      <button class="play" id="liveStart" type="button">เริ่มเจรจาด้วย AI</button>
+      <span class="small muted" id="liveMsg"></span>
+    </div>
+  </section>
 
   <div class="grid">
     <main>
@@ -267,6 +280,7 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
 
   function metricsHTML(sc) {
     const m = sc.metrics;
+    if (!m) return '';
     const rounds = Object.values(m.roundsByBuyer).reduce((a, b) => a + b, 0);
     const uplift = m.upliftVsBestOpeningPerKg;
     return `<section class="panel"><h2>ตัวชี้วัด</h2><div class="metrics">
@@ -280,19 +294,24 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
 
   function approvalHTML(sc) {
     const g = sc.group;
+    if (sc.status === 'queued' || sc.status === 'negotiating') {
+      return `<section class="panel outcome"><span class="chip agent">กำลังเจรจา</span><h2 style="margin-top:8px">น้องมะระกำลังทำงาน…</h2>
+        <p class="small muted" style="margin-top:6px">ขั้นที่ทำแล้ว ${sc.steps.length} ขั้น · หน้านี้อัปเดตเอง</p></section>`;
+    }
     if (!sc.deal) {
       return `<section class="panel outcome warn"><span class="chip warn">${sc.outcome === 'escalated' ? 'ส่งเรื่องให้กลุ่ม' : 'หยุดอย่างปลอดภัย'}</span>
         <h2 style="margin-top:8px">ยังไม่มีดีลให้อนุมัติ</h2><p class="small" style="margin-top:6px">${esc(sc.reason)}</p>
         <dl class="kv"><dt>กลุ่ม</dt><dd>${esc(g.cropLabel)} เกรด ${g.grade}</dd><dt>ปริมาณรวม</dt><dd class="num">${kg(g.totalKg)} กก.</dd><dt>สมาชิก</dt><dd>${g.members} ราย</dd></dl>
         <p class="small muted" style="margin-top:10px">ทางเลือกของกลุ่ม: รอรอบราคาใหม่ หาผู้ซื้อเพิ่ม หรือสมาชิกแต่ละคนปรับราคาขั้นต่ำของตัวเอง (คนอื่นแก้แทนไม่ได้)</p></section>`;
     }
-    const a = (approvals[sc.id] ??= {});
-    const buyerMin = (sc.steps.find((s) => s.kind === 'buyers')?.buyers ?? []).find((b) => b.id === sc.deal.buyerId)?.minKg ?? 0;
+    const a = sc.live ? Object.fromEntries(Object.entries(sc.approvals ?? {}).map(([k, v]) => [k, v === 'approve' ? 'yes' : 'no'])) : (approvals[sc.id] ??= {});
+    const buyerMin = sc.buyerMinKg ?? (sc.steps.find((s) => s.kind === 'buyers')?.buyers ?? []).find((b) => b.id === sc.deal.buyerId)?.minKg ?? 0;
     const active = sc.farmers.filter((f) => a[f.id] !== 'no');
     const activeKg = active.reduce((t, f) => t + f.kg, 0);
     const allYes = active.length > 0 && active.every((f) => a[f.id] === 'yes');
     const enough = activeKg >= buyerMin;
-    const deal = allYes && enough ? 'ตกลงแล้ว' : !enough ? 'ต้องเจรจาใหม่ (ปริมาณไม่พอ)' : 'รออนุมัติ';
+    const agreed = sc.live ? sc.status === 'agreed' : allYes && enough;
+    const deal = agreed ? 'ตกลงแล้ว' : !enough ? 'ต้องเจรจาใหม่ (ปริมาณไม่พอ)' : sc.live && sc.attention ? 'รออนุมัติ · ' + sc.attention : 'รออนุมัติ';
     return `<section class="panel outcome ok"><span class="chip agent">รอเกษตรกรอนุมัติ</span>
       <h2 style="margin-top:8px">${esc(sc.deal.buyer)} · <span class="num">${baht(sc.deal.price)}</span> บาท/กก.</h2>
       <p class="small muted">${sc.deal.deductions.length ? esc(sc.deal.deductions.join(', ')) + ' · ' : ''}สุทธิเฉลี่ย <b class="num">${baht(sc.deal.netAvg)}</b> บาท/กก.</p>
@@ -304,11 +323,11 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
       <p class="small muted" style="margin-top:8px">ผู้ซื้อโอนเงินตรงเข้าบัญชีของเกษตรกรแต่ละคน ระบบไม่ถือเงิน · ราคาขั้นต่ำของแต่ละคนไม่แสดงและไม่ส่งให้ผู้ซื้อ</p>
       <div class="statusline">
         <span>ดีล: <b>${deal}</b></span>
-        <span>ส่งมอบ: <b>${allYes && enough ? 'รอนัดวัน' : 'ยังไม่เริ่ม'}</b></span>
+        <span>ส่งมอบ: <b>${agreed ? 'รอนัดวัน' : 'ยังไม่เริ่ม'}</b></span>
         <span>ชำระเงิน: <b>ยังไม่ถึงกำหนด</b></span>
         <span>ปริมาณ: <b class="num">${kg(activeKg)}</b> / ขั้นต่ำผู้ซื้อ ${kg(buyerMin)} กก.</span>
       </div>
-      <div class="actions"><button type="button" id="allYes">ทุกคนกดตกลง</button><button type="button" id="resetAppr">เริ่มใหม่</button></div>
+      ${sc.live ? `<p class="small muted" style="margin-top:8px">${sc.ledgerVerified ? 'ตรวจ hash chain ของ ledger แล้ว: ไม่มีการแก้ไขย้อนหลัง ✓' : 'ledger ตรวจไม่ผ่าน'}</p>` : `<div class="actions"><button type="button" id="allYes">ทุกคนกดตกลง</button><button type="button" id="resetAppr">เริ่มใหม่</button></div>`}
       <p class="small muted" style="margin-top:8px">ลองกด "ไม่" ให้สมาชิกบางคน: คนนั้นถอนตัว กลุ่มไปต่อได้ถ้าปริมาณยังพอ</p>
     </section>`;
   }
@@ -322,12 +341,12 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
         <dt>สมาชิก</dt><dd>${g.members} ราย</dd>
         <dt>ปริมาณรวม</dt><dd class="num">${kg(g.totalKg)} กก.</dd>
         <dt>ส่งมอบ</dt><dd>${esc(g.window.from)} ถึง ${esc(g.window.to)}</dd>
-        <dt>AI ที่ใช้</dt><dd class="small">${sc.llm.startsWith('mock') ? 'กฎตายตัว (สำรอง) · เวอร์ชันใช้งานจริงใช้ Amazon Nova' : sc.llm.startsWith('scripted') ? 'สคริปต์ทดสอบ (จำลองว่า AI ผิด)' : esc(sc.llm)}</dd>
+        <dt>AI ที่ใช้</dt><dd class="small">${sc.llm.startsWith('bedrock') ? 'Amazon Nova บน Bedrock' : sc.llm.startsWith('mock') ? 'กฎตายตัว (สำรอง) · เวอร์ชันใช้งานจริงใช้ Amazon Nova' : sc.llm.startsWith('scripted') ? 'สคริปต์ทดสอบ (จำลองว่า AI ผิด)' : esc(sc.llm)}</dd>
       </dl></section>`;
   }
 
-  function render(id) {
-    stop();
+  function render(id, keepPlayback) {
+    if (!keepPlayback) stop();
     current = DATA.scenarios.find((s) => s.id === id) ?? DATA.scenarios[0];
     for (const b of document.querySelectorAll('#tabs button')) b.setAttribute('aria-selected', String(b.dataset.id === current.id));
     $('#scenarioNote').textContent = current.note;
@@ -364,7 +383,10 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
   }
 
   // แท็บ
-  $('#tabs').innerHTML = DATA.scenarios.map((s) => `<button type="button" role="tab" data-id="${s.id}" aria-selected="false">${esc(s.title)}</button>`).join('');
+  function drawTabs() {
+    $('#tabs').innerHTML = DATA.scenarios.map((s) => `<button type="button" role="tab" data-id="${s.id}" aria-selected="${current && s.id === current.id}">${s.live ? '● ' : ''}${esc(s.live ? 'ดีลสด' : s.title)}</button>`).join('');
+  }
+  drawTabs();
   $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-id]'); if (b) render(b.dataset.id); });
   $('#playBtn').addEventListener('click', play);
   $('#allBtn').addEventListener('click', stop);
@@ -372,10 +394,20 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
     const b = e.target.closest('[data-more]');
     if (b) { const li = b.closest('li'); li.classList.toggle('open'); b.textContent = li.classList.contains('open') ? 'ย่อ' : 'อ่านต่อ'; }
   });
-  $('#side').addEventListener('click', (e) => {
-    const a = (approvals[current.id] ??= {});
+  $('#side').addEventListener('click', async (e) => {
     const b = e.target.closest('button');
     if (!b) return;
+    if (current.live && b.dataset.f) {
+      b.disabled = true;
+      try {
+        const r = await fetch(`api/deals/${current.id}/approvals`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ farmerId: b.dataset.f, decision: b.dataset.v === 'yes' ? 'approve' : 'reject' }) });
+        const j = await r.json();
+        if (!r.ok) $('#liveMsg').textContent = j.error ?? 'บันทึกไม่สำเร็จ';
+      } catch { $('#liveMsg').textContent = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'; }
+      await refreshLive(current.id);
+      return;
+    }
+    const a = (approvals[current.id] ??= {});
     if (b.dataset.f) a[b.dataset.f] = a[b.dataset.f] === b.dataset.v ? undefined : b.dataset.v;
     if (b.id === 'allYes') for (const f of current.farmers) if (a[f.id] !== 'no') a[f.id] = 'yes';
     if (b.id === 'resetAppr') approvals[current.id] = {};
@@ -383,6 +415,47 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
   });
 
   $('#foot').innerHTML = `<p>${esc(DATA.disclaimer)}</p><p>แหล่งราคา: ${esc(DATA.marketSource)} · วันที่ ${esc(DATA.marketDate)} · ทุกตัวเลขในหน้านี้มาจากการรันโค้ดของต้นแบบ (npm run demo:export)</p>`;
+
+  // ---------- โหมดเจรจาสด (เฉพาะหน้าที่เสิร์ฟจาก AWS) ----------
+  let poll = null;
+  async function refreshLive(id) {
+    try {
+      const r = await fetch(`api/deals/${encodeURIComponent(id)}`, { cache: 'no-store' });
+      const j = await r.json();
+      if (!r.ok) { $('#liveMsg').textContent = j.error ?? 'โหลดดีลไม่สำเร็จ'; return; }
+      const sc = { ...j, live: true, title: 'ดีลสด' };
+      const i = DATA.scenarios.findIndex((s) => s.live);
+      if (i >= 0) DATA.scenarios[i] = sc; else DATA.scenarios.unshift(sc);
+      drawTabs();
+      const atBottom = innerHeight + scrollY >= document.body.scrollHeight - 40;
+      render(sc.id, true);
+      if (atBottom && (sc.status === 'negotiating' || sc.status === 'queued')) scrollTo({ top: document.body.scrollHeight });
+      const done = !['queued', 'negotiating'].includes(sc.status);
+      $('#liveMsg').textContent = done ? `เสร็จแล้ว · ลิงก์ดีลนี้: ?deal=${sc.id}` : 'กำลังเจรจา…';
+      if (done) { clearInterval(poll); poll = null; $('#liveStart').disabled = false; }
+    } catch { $('#liveMsg').textContent = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ จะลองใหม่'; }
+  }
+  function follow(id) {
+    clearInterval(poll);
+    refreshLive(id);
+    poll = setInterval(() => refreshLive(id), 2000);
+  }
+  if (window.MARA_LIVE) {
+    $('#liveBar').hidden = false;
+    $('#liveStart').addEventListener('click', async () => {
+      $('#liveStart').disabled = true;
+      $('#liveMsg').textContent = 'กำลังเริ่ม…';
+      try {
+        const r = await fetch('api/deals', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ crop: $('#liveCrop').value }) });
+        const j = await r.json();
+        if (!r.ok) { $('#liveMsg').textContent = j.error ?? 'เริ่มไม่สำเร็จ'; $('#liveStart').disabled = false; return; }
+        history.replaceState(null, '', `?deal=${j.id}`);
+        follow(j.id);
+      } catch { $('#liveMsg').textContent = 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้'; $('#liveStart').disabled = false; }
+    });
+    const q = new URLSearchParams(location.search).get('deal');
+    if (q) follow(q);
+  }
 
   const hashId = location.hash.slice(1);
   let saved = null;

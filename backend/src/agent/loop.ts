@@ -79,7 +79,13 @@ export async function runNegotiation(
   input: NegotiationInput,
   deps: AgentDeps,
   llm: LlmClient,
-  opts: { ledger?: Ledger; limits?: Partial<AgentLimits>; now?: () => Date } = {},
+  opts: {
+    ledger?: Ledger;
+    limits?: Partial<AgentLimits>;
+    now?: () => Date;
+    /** เรียกทุกครั้งที่มีเหตุการณ์ใหม่ (เช่น เขียนลงฐานข้อมูลให้หน้าเว็บเห็นแบบสด) — ล้มเหลวได้โดยไม่ทำให้ Agent หยุด */
+    onEvent?: (e: TraceEvent) => void | Promise<void>;
+  } = {},
 ): Promise<AgentResult> {
   const limits = { ...DEFAULT_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
@@ -88,9 +94,18 @@ export async function runNegotiation(
   const trace: TraceEvent[] = [];
   const m = { steps: 0, llmCalls: 0, inputTokens: 0, outputTokens: 0, toolCalls: 0 };
 
+  const pending: Promise<unknown>[] = [];
   const emit = (type: string, data: Record<string, unknown>) => {
-    trace.push({ seq: trace.length + 1, at: now().toISOString(), type, data });
+    const ev = { seq: trace.length + 1, at: now().toISOString(), type, data };
+    trace.push(ev);
     opts.ledger?.append({ dealId: input.dealId, actor: ACTOR[type] ?? 'system', type: `agent.${type}`, data });
+    if (opts.onEvent) {
+      try {
+        pending.push(Promise.resolve(opts.onEvent(ev)).catch(() => undefined));
+      } catch {
+        /* การบันทึกล้มเหลวไม่ควรทำให้การเจรจาพัง */
+      }
+    }
   };
 
   let status: DealStatus = 'draft';
@@ -201,6 +216,7 @@ export async function runNegotiation(
   setStatus(outcome.kind === 'prepared' ? 'pending_approval' : 'failed');
   emit('outcome', outcome.kind === 'prepared' ? { kind: 'prepared', buyerId: outcome.buyerId, buyerName: outcome.buyerName, summary: outcome.summary, evaluation: outcome.evaluation } : { ...outcome });
 
+  await Promise.all(pending);
   return { dealId: input.dealId, status, outcome, trace, metrics: buildMetrics(st, m, llm.name, Date.now() - started, outcome) };
 }
 

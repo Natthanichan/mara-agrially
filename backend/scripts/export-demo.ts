@@ -6,13 +6,13 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { MockBuyerApi } from '../src/buyer/mockBuyer.js';
 import { groupListings } from '../src/core/grouping.js';
-import { checkPriceFloor, computeNetPerFarmer } from '../src/core/pricing.js';
 import type { Crop } from '../src/core/types.js';
-import { CROP_LABEL_TH, farmers, listings } from '../src/data/synthetic.js';
+import { farmers, listings } from '../src/data/synthetic.js';
+import { buildDealView } from '../src/agent/view.js';
 import { summarize, NABC_SOURCE_LABEL } from '../src/market/nabcClient.js';
 import { loadKnowledgeDir } from '../src/rag/chunker.js';
 import { KnowledgeIndex } from '../src/rag/search.js';
-import { runNegotiation, type AgentDeps, type AgentResult } from '../src/agent/index.js';
+import { runNegotiation, type AgentDeps } from '../src/agent/index.js';
 import { RuleBasedMockLlm } from '../src/agent/llm/mock.js';
 import type { ContentBlock, LlmClient, LlmRequest } from '../src/agent/llm/types.js';
 
@@ -50,86 +50,10 @@ function careless(): LlmClient {
   return { name: 'scripted:careless-ai-test', converse: async (req) => ({ content: steps[Math.min(i++, steps.length - 1)]!(req) }) };
 }
 
-type Step = Record<string, unknown> & { kind: string; at: string };
-
-function toSteps(res: AgentResult): Step[] {
-  const steps: Step[] = [];
-  const buyerBySession = new Map<string, string>();
-  let lastCall: { tool: string; input: Record<string, unknown> } | undefined;
-  for (const e of res.trace) {
-    const d = e.data as Record<string, any>;
-    const at = e.at;
-    switch (e.type) {
-      case 'plan':
-      case 'reasoning':
-        steps.push({ kind: e.type, at, text: d.text });
-        break;
-      case 'tool_call':
-        lastCall = { tool: d.tool, input: d.input };
-        break;
-      case 'buyer_response':
-        buyerBySession.set(d.sessionId, d.buyerName);
-        steps.push({ kind: 'buyer', at, buyer: d.buyerName, buyerId: d.buyerId, decision: d.decision, price: d.pricePerKg, deductions: d.deductions, message: d.message, round: d.round });
-        break;
-      case 'counter_sent':
-        steps.push({ kind: 'counter', at, buyerId: d.buyerId, price: d.pricePerKg, contest: d.contestDeductions, message: d.message });
-        break;
-      case 'guardrail_blocked':
-        steps.push({ kind: 'blocked', at, buyerId: d.buyerId, code: d.code, reason: d.reason, attemptedPrice: d.attemptedPricePerKg ?? d.pricePerKg });
-        break;
-      case 'tool_result': {
-        const r = d.result as Record<string, any>;
-        if (!r || d.ok === false) {
-          if (r?.error) steps.push({ kind: 'tool_error', at, tool: d.tool, error: r.error });
-          break;
-        }
-        if (d.tool === 'get_market_price') steps.push({ kind: 'market', at, ...r });
-        if (d.tool === 'search_knowledge')
-          steps.push({ kind: 'rag', at, query: lastCall?.input.query, mode: r.mode, hits: r.results.map((h: any) => ({ source: h.source, text: h.text.split('\n').slice(1).join(' '), disclaimer: h.disclaimer })) });
-        if (d.tool === 'list_buyers') steps.push({ kind: 'buyers', at, buyers: r.buyers });
-        const ev = d.tool === 'evaluate_offer' ? r : d.tool === 'submit_counter' ? r.evaluation : undefined;
-        if (ev?.sessionId)
-          steps.push({ kind: 'evaluation', at, buyer: buyerBySession.get(ev.sessionId), buyerId: ev.buyerId, price: ev.pricePerKg, deductions: ev.deductions, netAvg: ev.netPerKgAvg, netMin: ev.netPerKgMin, passes: ev.passesAllFloors, below: ev.membersBelowFloor, total: ev.totalNetBaht });
-        break;
-      }
-      case 'outcome':
-        steps.push({ ...d, outcomeKind: d.kind, kind: 'outcome', at });
-        break;
-      case 'llm_error':
-        steps.push({ kind: 'llm_error', at, error: d.error });
-        break;
-    }
-  }
-  return steps;
-}
-
 async function scenario(id: string, title: string, crop: Crop, llm: LlmClient, note: string) {
   const group = groups.find((g) => g.crop === crop)!;
   const res = await runNegotiation({ dealId: `D-${id}`, group, farmers, listings, date: DATE }, deps(), llm, { now });
-  const ids = new Set(group.members.map((m) => m.farmerId));
-  const farmerRows = (terms?: Parameters<typeof computeNetPerFarmer>[1]) => {
-    const nets = terms ? computeNetPerFarmer(group.members, terms) : [];
-    const pass = terms ? new Set(group.members.map((m) => m.farmerId).filter((fid) => !checkPriceFloor(group.members, listings, terms).violations.some((v) => v.farmerId === fid))) : new Set<string>();
-    return group.members.map((m) => {
-      const f = farmers.find((x) => x.id === m.farmerId)!;
-      const n = nets.find((x) => x.farmerId === m.farmerId);
-      return { id: f.id, name: f.name, district: f.district, route: f.routeId, kg: m.quantityKg, account: f.bankAccountMasked, ...(n ? { transportPerKg: n.transportPerKg, otherPerKg: n.otherDeductionsPerKg, netPerKg: n.netPerKg, netTotal: n.netTotal, passesFloor: pass.has(f.id) } : {}) };
-    });
-  };
-  return {
-    id,
-    title,
-    note,
-    llm: llm.name,
-    status: res.status,
-    outcome: res.outcome.kind,
-    group: { id: group.id, crop, cropLabel: CROP_LABEL_TH[crop], grade: group.grade, province: group.province, window: group.deliveryWindow, totalKg: group.members.reduce((s, m) => s + m.quantityKg, 0), members: ids.size },
-    farmers: farmerRows(res.outcome.kind === 'prepared' ? res.outcome.terms : undefined),
-    deal: res.outcome.kind === 'prepared' ? { buyer: res.outcome.buyerName, buyerId: res.outcome.buyerId, price: res.outcome.terms.pricePerKg, deductions: res.outcome.evaluation.deductions, netAvg: res.outcome.evaluation.netPerKgAvg, total: res.outcome.evaluation.totalNetBaht, summary: res.outcome.summary } : undefined,
-    reason: res.outcome.kind !== 'prepared' ? res.outcome.reason : undefined,
-    metrics: res.metrics,
-    steps: toSteps(res),
-  };
+  return buildDealView({ id, title, note, llm: llm.name, status: res.status, group, farmers, listings, trace: res.trace, outcome: res.outcome, metrics: res.metrics });
 }
 
 const data = {
@@ -147,10 +71,18 @@ const data = {
 const out = fileURLToPath(new URL('../../web/demo-data.json', import.meta.url));
 mkdirSync(fileURLToPath(new URL('../../web/', import.meta.url)), { recursive: true });
 writeFileSync(out, JSON.stringify(data, null, 1));
-for (const s of data.scenarios) console.log(`${s.id}: ${s.status} (${s.outcome}) steps=${s.steps.length} blocks=${s.metrics.guardrailBlocks}`);
+for (const s of data.scenarios) console.log(`${s.id}: ${s.status} (${s.outcome}) steps=${s.steps.length} blocks=${s.metrics?.guardrailBlocks}`);
 
 // สร้างหน้าเดโม: ฝังข้อมูลลงใน template (กัน </script> ในข้อมูลด้วยการ escape "<")
 const tplPath = fileURLToPath(new URL('../../web/index.template.html', import.meta.url));
 const html = readFileSync(tplPath, 'utf8').replace('__DEMO_DATA__', () => JSON.stringify(data).replace(/</g, '\\u003c'));
 writeFileSync(fileURLToPath(new URL('../../web/index.html', import.meta.url)), html);
 console.log('web/index.html สร้างแล้ว');
+
+// เวอร์ชันสำหรับ Lambda: หน้าเดียวกัน + โหมดเจรจาสด (เรียก API จริงบน AWS)
+const livePage = html.replace('<script id="demo-data"', '<script>window.MARA_LIVE = true;</script>\n<script id="demo-data"');
+writeFileSync(
+  fileURLToPath(new URL('../src/generated/page.ts', import.meta.url)),
+  `// สร้างอัตโนมัติด้วย npm run build:assets — ห้ามแก้ไฟล์นี้เอง\nexport const PAGE_HTML: string = ${JSON.stringify('<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"></head><body>' + livePage + '</body></html>')};\n`,
+);
+console.log('src/generated/page.ts สร้างแล้ว');

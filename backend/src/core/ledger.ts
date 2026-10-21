@@ -26,6 +26,15 @@ export class Ledger {
   private events: LedgerEvent[] = [];
   constructor(private now: () => Date = () => new Date()) {}
 
+  /** ต่อ ledger จากเหตุการณ์ที่เก็บไว้แล้ว (เช่น อ่านจากฐานข้อมูล) — ตรวจ hash chain ก่อนรับ */
+  static from(events: readonly LedgerEvent[], now?: () => Date): Ledger {
+    const l = new Ledger(now);
+    const sorted = [...events].sort((a, b) => a.seq - b.seq);
+    if (!l.verify(sorted).ok) throw new Error('hash chain ของ ledger ที่เก็บไว้ไม่ถูกต้อง');
+    l.events = sorted.map((e) => Object.freeze({ ...e }));
+    return l;
+  }
+
   append(input: { dealId: string; actor: LedgerActor; actorId?: string; type: string; data?: Record<string, unknown> }): LedgerEvent {
     const prev = this.events[this.events.length - 1];
     const base = {

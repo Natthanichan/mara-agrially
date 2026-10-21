@@ -135,3 +135,8 @@ export function loadKnowledgeDir(dir: string, opts?: Partial<ChunkOptions>): Chu
     .sort()
     .flatMap((f) => chunkMarkdown(f, readFileSync(join(dir, f), 'utf8'), opts));
 }
+
+/** สร้างชิ้นเอกสารจากเนื้อหาที่ฝังไว้ในโค้ด (ใช้บน Lambda ซึ่งไม่มีโฟลเดอร์ knowledge/) */
+export function chunkFiles(files: { file: string; content: string }[], opts?: Partial<ChunkOptions>): Chunk[] {
+  return [...files].sort((a, b) => a.file.localeCompare(b.file)).flatMap((f) => chunkMarkdown(f.file, f.content, opts));
+}

@@ -11,9 +11,9 @@
 - [x] ขั้นที่ 3 Mock Buyer API (ผู้ซื้อจำลอง 4 ราย: กดราคา, กลางๆ, ซ่อนค่าหักความชื้น, ค้าส่งผัก)
 - [x] ขั้นที่ 3.5 ราคาตลาดจริงจาก NABC + RAG (custom chunking, BM25 + bigram, รองรับ embedding ภายหลัง)
 - [x] ขั้นที่ 4 Agent loop (Nova บน Bedrock หรือ LLM จำลอง + tool calling + guardrails)
-- [ ] ขั้นที่ 5 อนุมัติ/ปฏิเสธ/เจรจาใหม่ + ledger
+- [x] ขั้นที่ 5 อนุมัติ/ปฏิเสธรายคน + ledger ต่อ hash chain (API `POST /api/deals/{id}/approvals`)
 - [x] ขั้นที่ 6 (เวอร์ชันเดโม) หน้าเล่นซ้ำการเจรจา `web/index.html` — สร้างจากผลรันจริงด้วย `npm run demo:export`
-- [ ] ขั้นที่ 7 Deploy AWS `ap-southeast-1` Singapore (ต้องขออนุมัติทีมก่อน)
+- [x] ขั้นที่ 7 (พร้อม deploy) SAM template: API Gateway + Lambda × 2 + DynamoDB — ดูหัวข้อ Deploy
 - [ ] ขั้นที่ 8 LINE OA adapter
 
 ## กติกาที่บังคับในโค้ด (`backend/src/core`)
@@ -65,10 +65,30 @@ LLM_PROVIDER=bedrock BEDROCK_MODEL_ID=<จาก console> AWS_REGION=ap-southeas
 ```
 ผลทดสอบ (LLM จำลอง, ข้อมูลจำลอง + ราคา NABC 19 ต.ค.): ข้าว 41.5 ตัน → เลือกโรงสี C หลังต่อรองหักความชื้น 4%→1.5% ราคาสุทธิเฉลี่ย 17.91 บาท/กก. สูงกว่าข้อเสนอแรกที่ดีที่สุด +0.61 บาท/กก. (≈25,315 บาททั้งกลุ่ม) — *เป็นผลทดสอบจากข้อมูลจำลอง ไม่ใช่ผลจริงในตลาด*
 
+## Deploy บน AWS (CloudShell, `ap-southeast-1`)
+```bash
+git clone https://github.com/Natthanichan/mara-agrially && cd mara-agrially/backend
+npm install
+sam build
+sam deploy --parameter-overrides BedrockModelId=<Nova model/inference profile ID>   # ยืนยัน changeset ด้วย y
+```
+ผลลัพธ์ `AppUrl` คือหน้าเว็บ (กด "เริ่มเจรจาด้วย AI" เพื่อรันดีลสด) · อัปเดตโค้ด: `git pull && sam build && sam deploy` · ลบทั้งหมด: `sam delete`
+
+| Resource | ทำอะไร | ค่าใช้จ่าย |
+|---|---|---|
+| API Gateway HTTP API (throttle 10 req/s) | หน้าเว็บ + API + LINE webhook | จ่ายตามใช้ |
+| Lambda `api` (15 วิ) / `worker` (180 วิ, ไม่ retry) | ตอบเร็ว / รัน Agent เบื้องหลัง | จ่ายตามใช้ |
+| DynamoDB on-demand 1 ตาราง | ดีล, ledger, โควตา, snapshot ราคา NABC | จ่ายตามใช้ |
+| Bedrock Amazon Nova (IAM อนุญาตเฉพาะ Nova) | Agent | ต่อ token · จำกัด `DailyNegotiationLimit` ครั้ง/วัน (ค่าเริ่มต้น 60) |
+| CloudWatch Logs (เก็บ 7 วัน) | log | จ่ายตามใช้ |
+
+ไม่มี EC2, NAT Gateway, load balancer หรือ OpenSearch · ใช้ LLM จำลองแทน Nova ได้: `--parameter-overrides LlmProvider=mock`
+
 ## รันในเครื่อง
 ```bash
 cd backend
 npm install
-npm run typecheck
-npm test
+npm test               # unit test ทั้งหมด
+npm run dev            # ทั้งระบบในเครื่อง http://localhost:3000 (memory + LLM จำลอง)
+npm run build:assets   # หลังแก้ knowledge/*.md หรือ web/index.template.html
 ```

@@ -10,19 +10,26 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "agent:demo": "tsx scripts/demo.ts",
-    "demo:export": "tsx scripts/export-demo.ts"
+    "demo:export": "tsx scripts/export-demo.ts",
+    "build:assets": "tsx scripts/gen-assets.ts && tsx scripts/export-demo.ts",
+    "dev": "tsx scripts/local-server.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.164",
     "@types/node": "^22.20.5",
+    "esbuild": "^0.25.10",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"
   },
   "type": "module",
   "dependencies": {
-    "@aws-sdk/client-bedrock-runtime": "^3.1153.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.1153.0",
+    "@aws-sdk/client-dynamodb": "^3.1154.0",
+    "@aws-sdk/client-lambda": "^3.1154.0",
+    "@aws-sdk/lib-dynamodb": "^3.1154.0"
   }
 }

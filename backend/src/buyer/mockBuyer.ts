@@ -198,6 +198,12 @@ export class MockBuyerApi {
     }));
   }
 
+  /** ข้อมูลสาธารณะของผู้ซื้อ 1 ราย (ไม่มีราคา reservation) */
+  getProfile(buyerId: string): BuyerPublicProfile | undefined {
+    const b = BUYERS.find((x) => x.id === buyerId);
+    return b && { id: b.id, name: b.name, type: b.type, province: b.province, minKg: b.minKg, maxKg: b.maxKg, paymentTermDays: b.paymentTermDays };
+  }
+
   requestQuote(buyerId: string, req: QuoteRequest): BuyerResponse {
     assertNoPrivateData(req);
     const buyer = BUYERS.find((b) => b.id === buyerId);

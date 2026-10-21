@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  MaRa-AgriAlly prototype — serverless, pay-per-use only (no EC2, NAT, load balancer, OpenSearch).
+  Delete everything with: sam delete
+
+Parameters:
+  LlmProvider:
+    Type: String
+    Default: bedrock
+    AllowedValues: [bedrock, mock]
+    Description: bedrock = Amazon Nova, mock = rule-based fallback (no Bedrock cost)
+  BedrockModelId:
+    Type: String
+    Default: apac.amazon.nova-2-lite-v1:0
+    Description: Nova model ID or inference profile ID shown in the Bedrock console (ap-southeast-1)
+  DailyNegotiationLimit:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    MaxValue: 500
+    Description: Max negotiations per day (caps Bedrock spend on a public URL)
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    MemorySize: 512
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref Table
+        LLM_PROVIDER: !Ref LlmProvider
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        DAILY_NEGOTIATION_LIMIT: !Ref DailyNegotiationLimit
+        AGENT_MAX_ROUNDS: '5'
+        NABC_TIMEOUT_MS: '5000'
+        NODE_OPTIONS: --enable-source-maps
+
+Resources:
+  # ตารางเดียว จ่ายตามใช้ (on-demand) — ข้อมูลดีล, ledger, โควตา, snapshot ราคา NABC
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      SSESpecification:
+        SSEEnabled: true
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-api
+      RetentionInDays: 7
+
+  WorkerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-worker
+      RetentionInDays: 7
+
+  # หน้าเว็บ + API (ตอบเร็ว ไม่รอการเจรจา)
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-api
+      CodeUri: .
+      Handler: api.handler
+      Timeout: 15
+      LoggingConfig:
+        LogGroup: !Ref ApiLogs
+      Environment:
+        Variables:
+          WORKER_FUNCTION_NAME: !Ref WorkerFunction
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+        - LambdaInvokePolicy: { FunctionName: !Ref WorkerFunction }
+      Events:
+        Root:
+          Type: HttpApi
+          Properties: { ApiId: !Ref HttpApi, Path: /, Method: GET }
+        Proxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: '/{proxy+}'
+            Method: ANY
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Target: es2022
+        Sourcemap: true
+        EntryPoints: [src/aws/api.ts]
+
+  # รัน Agent เบื้องหลัง (การเจรจาอาจนานเกิน 30 วินาทีที่ API Gateway รอได้)
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-worker
+      CodeUri: .
+      Handler: worker.handler
+      Timeout: 180
+      LoggingConfig:
+        LogGroup: !Ref WorkerLogs
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0   # ไม่ retry อัตโนมัติ (กันจ่ายค่า Bedrock ซ้ำ)
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+        - Statement:
+            - Sid: InvokeAmazonNovaOnly
+              Effect: Allow
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/amazon.nova*
+                - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova*
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Target: es2022
+        Sourcemap: true
+        EntryPoints: [src/aws/worker.ts]
+
+Outputs:
+  AppUrl:
+    Description: เปิดหน้านี้ในเบราว์เซอร์
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/
+  LineWebhookUrl:
+    Description: ใส่ใน LINE Developers Console (ขั้นถัดไป)
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/line/webhook
+  TableName:
+    Value: !Ref Table
