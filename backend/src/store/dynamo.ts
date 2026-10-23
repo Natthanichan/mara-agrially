@@ -4,6 +4,8 @@
 //   DEALINDEX   / <createdAt>#<id> ดัชนีดีลล่าสุด
 //   QUOTA       / <YYYY-MM-DD>     ตัวนับโควตาการเจรจาต่อวัน
 //   NABC        / <YYYY-MM-DD>     snapshot ราคาตลาดรายวัน (ใช้วิเคราะห์ต่อได้)
+//   LINE#<uid>  / SESSION          สถานะคุยกับเกษตรกรใน LINE (ร่างผลผลิตรอยืนยัน) — มี ttl
+//   LINEEVENT   / <webhookEventId> กัน LINE ส่ง event ซ้ำ — มี ttl
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -17,7 +19,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { LedgerEvent } from '../core/ledger.js';
 import type { NabcRecord, SnapshotStore } from '../market/nabcClient.js';
-import type { DealRecord, DealStore } from './types.js';
+import type { DealRecord, DealStore, LineSession } from './types.js';
 
 type Doc = Pick<DynamoDBDocumentClient, 'send'>;
 
@@ -155,6 +157,30 @@ export class DynamoDealStore implements DealStore {
           ExpressionAttributeValues: { ':one': 1, ':limit': limit },
         }),
       );
+      return true;
+    } catch (e) {
+      if (isConditionFail(e)) return false;
+      throw e;
+    }
+  }
+
+  async getLineSession(userId: string) {
+    const r = await this.db.send(new GetCommand({ TableName: this.table, Key: { pk: `LINE#${userId}`, sk: 'SESSION' }, ConsistentRead: true }));
+    if (!r.Item) return undefined;
+    const { pk: _pk, sk: _sk, ttl: _ttl, ...rest } = r.Item;
+    return rest as LineSession;
+  }
+
+  async putLineSession(userId: string, s: LineSession) {
+    // เก็บ 30 วันแล้วให้ DynamoDB ลบเอง (TTL)
+    const ttl = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `LINE#${userId}`, sk: 'SESSION', ttl, ...s } }));
+  }
+
+  async claimWebhookEvent(eventId: string) {
+    const ttl = Math.floor(Date.now() / 1000) + 2 * 86_400;
+    try {
+      await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: 'LINEEVENT', sk: eventId, ttl }, ConditionExpression: 'attribute_not_exists(sk)' }));
       return true;
     } catch (e) {
       if (isConditionFail(e)) return false;

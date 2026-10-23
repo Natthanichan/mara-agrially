@@ -1,0 +1,358 @@
+import { readFileSync } from 'node:fs';
+import type { APIGatewayProxyEventV2 } from 'aws-lambda';
+import { describe, expect, it, vi } from 'vitest';
+import { RuleBasedMockLlm } from '../src/agent/llm/mock.js';
+import { runDeal, type AppContext } from '../src/app/service.js';
+import { handleHttp } from '../src/aws/http.js';
+import { MockBuyerApi } from '../src/buyer/mockBuyer.js';
+import { Ledger } from '../src/core/ledger.js';
+import { KNOWLEDGE_FILES } from '../src/generated/knowledge.js';
+import { LineBot } from '../src/line/bot.js';
+import { LineApiError, LineClient, type LineMessage } from '../src/line/client.js';
+import { parsePostback, postbackData } from '../src/line/flex.js';
+import { parseListing } from '../src/line/parse.js';
+import { secretsLoader } from '../src/line/secrets.js';
+import { signLineBody, verifyLineSignature } from '../src/line/signature.js';
+import { summarize } from '../src/market/nabcClient.js';
+import { chunkFiles } from '../src/rag/chunker.js';
+import { KnowledgeIndex } from '../src/rag/search.js';
+import { MemoryDealStore } from '../src/store/memory.js';
+
+const fixture = JSON.parse(readFileSync(new URL('./fixtures/nabc-2026-10-19.json', import.meta.url), 'utf8'));
+const knowledge = new KnowledgeIndex(chunkFiles(KNOWLEDGE_FILES));
+const SECRET = 'test-channel-secret';
+const TOKEN = 'test-access-token';
+
+describe('อ่านข้อความผลผลิตจาก LINE', () => {
+  it('ข้อความปกติ: พืช ปริมาณ เกรด ราคาขั้นต่ำ', () => {
+    expect(parseListing('ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.')).toMatchObject({ ok: true, gradeAssumed: false, draft: { crop: 'rice_hommali', quantityKg: 12_000, grade: 'A', floorPricePerKg: 17 } });
+    expect(parseListing('มะระจีน 1,800 กก. ไม่ต่ำกว่า 18.5 บาท')).toMatchObject({ ok: true, draft: { crop: 'bitter_gourd', quantityKg: 1800, floorPricePerKg: 18.5, grade: 'A' }, gradeAssumed: true });
+    expect(parseListing('มันสำปะหลัง 25 ตัน เกรดบี ราคา 3.7')).toMatchObject({ ok: true, draft: { crop: 'cassava', quantityKg: 25_000, grade: 'B', floorPricePerKg: 3.7 } });
+  });
+
+  it('เลขไทย และเลขปริมาณไม่ถูกอ่านเป็นราคา', () => {
+    expect(parseListing('ข้าว ๑๒ ตัน ขั้นต่ำ ๑๗.๕ บาท/กก.')).toMatchObject({ ok: true, draft: { quantityKg: 12_000, floorPricePerKg: 17.5 } });
+    // "ขั้นต่ำ 10 ตัน" คือปริมาณ ไม่ใช่ราคา → ต้องถามราคา
+    const r = parseListing('ข้าวหอมมะลิ 10 ตัน ขั้นต่ำ 10 ตัน');
+    expect(r.ok).toBe(false);
+  });
+
+  it('ข้อมูลไม่ครบ/ผิดปกติ → บอกว่าขาดอะไร ไม่เดา', () => {
+    const missing = parseListing('ข้าวหอมมะลิ 12 ตัน');
+    expect(missing).toMatchObject({ ok: false });
+    expect(!missing.ok && missing.problems.join(' ')).toContain('ราคาสุทธิขั้นต่ำ');
+    expect(parseListing('สวัสดี')).toMatchObject({ ok: false, problems: expect.arrayContaining([expect.any(String), expect.any(String), expect.any(String)]) });
+    expect(parseListing('ข้าว 12 ตัน ขั้นต่ำ 0 บาท').ok).toBe(false); // ราคา 0
+    expect(parseListing('ข้าว 5 กก. ขั้นต่ำ 17 บาท').ok).toBe(false); // น้อยเกินไป
+    expect(parseListing('ข้าว มะระ 12 ตัน ขั้นต่ำ 17 บาท').ok).toBe(false); // หลายพืช
+  });
+});
+
+describe('ตรวจลายเซ็น LINE', () => {
+  const body = '{"destination":"U1","events":[]}';
+  it('ลายเซ็นถูกต้องผ่าน ผิด/ว่าง/ถูกแก้ body ไม่ผ่าน', () => {
+    const sig = signLineBody(body, SECRET);
+    expect(verifyLineSignature(body, sig, SECRET)).toBe(true);
+    expect(verifyLineSignature(body + ' ', sig, SECRET)).toBe(false);
+    expect(verifyLineSignature(body, signLineBody(body, 'other'), SECRET)).toBe(false);
+    expect(verifyLineSignature(body, undefined, SECRET)).toBe(false);
+    expect(verifyLineSignature(body, '', SECRET)).toBe(false);
+    expect(verifyLineSignature(body, 'not-base64!!', SECRET)).toBe(false);
+    expect(verifyLineSignature(body, sig, '')).toBe(false);
+  });
+});
+
+describe('postback data', () => {
+  it('สร้างและอ่านกลับได้ ข้อมูลแปลกปลอมถูกปฏิเสธ', () => {
+    expect(parsePostback(postbackData('approve', 'deal-1'))).toEqual({ act: 'approve', dealId: 'deal-1' });
+    expect(parsePostback(postbackData('confirm'))).toEqual({ act: 'confirm' });
+    expect(parsePostback('act=drop_table&d=x')).toBeUndefined();
+    expect(parsePostback('')).toBeUndefined();
+  });
+});
+
+describe('LINE client / secrets', () => {
+  it('ส่ง Bearer token และไม่ใส่ token ใน error', async () => {
+    const calls: { url: string; headers: Record<string, string>; body: string }[] = [];
+    const ok = new LineClient(TOKEN, async (url, init) => (calls.push({ url, headers: init.headers, body: init.body }), { ok: true, status: 200, text: async () => '' }));
+    await ok.push('U1', [{ type: 'text', text: 'hi' }]);
+    expect(calls[0]).toMatchObject({ url: 'https://api.line.me/v2/bot/message/push', headers: { authorization: `Bearer ${TOKEN}` } });
+
+    const bad = new LineClient(TOKEN, async () => ({ ok: false, status: 401, text: async () => 'Authentication failed' }));
+    const err = await bad.reply('rt', []).catch((e) => e);
+    expect(err).toBeInstanceOf(LineApiError);
+    expect(err.message).not.toContain(TOKEN);
+  });
+
+  it('อ่านจาก SSM ด้วย WithDecryption และแคชไว้ ถ้าขาดค่าก็ error บอกชื่อที่ขาด', async () => {
+    const send = vi.fn(async () => ({ Parameters: [{ Name: '/mara-agrially/line/channel-secret', Value: SECRET }, { Name: '/mara-agrially/line/channel-access-token', Value: TOKEN }] }));
+    const load = secretsLoader({}, { send } as never);
+    expect(await load()).toEqual({ channelSecret: SECRET, channelAccessToken: TOKEN });
+    await load();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify((send.mock.calls[0] as unknown[])[0])).toContain('"WithDecryption":true');
+
+    const missing = secretsLoader({}, { send: async () => ({ Parameters: [{ Name: '/mara-agrially/line/channel-secret', Value: SECRET }] }) } as never);
+    await expect(missing()).rejects.toThrow('channel-access-token');
+    expect(await secretsLoader({ LINE_CHANNEL_SECRET: 's', LINE_CHANNEL_ACCESS_TOKEN: 't' }, { send } as never)()).toEqual({ channelSecret: 's', channelAccessToken: 't' });
+  });
+});
+
+// ---------- ทั้ง flow ผ่าน webhook (ที่เก็บข้อมูลใน memory, LLM จำลอง, LINE client ปลอม) ----------
+
+type Sent = { kind: 'reply' | 'push'; to: string; messages: LineMessage[] };
+
+function setup(opts: { dailyLimit?: number } = {}) {
+  const store = new MemoryDealStore();
+  const sent: Sent[] = [];
+  const client = {
+    reply: async (to: string, messages: LineMessage[]) => void sent.push({ kind: 'reply', to, messages }),
+    push: async (to: string, messages: LineMessage[]) => void sent.push({ kind: 'push', to, messages }),
+  };
+  let n = 0;
+  const ctx: AppContext = {
+    store,
+    dailyLimit: opts.dailyLimit ?? 20,
+    newId: () => `deal-${++n}`,
+    now: () => new Date('2026-10-19T03:00:00Z'),
+    llm: () => new RuleBasedMockLlm(),
+    agentDeps: () => ({ buyers: new MockBuyerApi(), knowledge, market: { getReference: async (c, d, p) => summarize(fixture.data, c, d, false, p) } }),
+    invokeWorker: async (id) => {
+      await runDeal(ctx, id);
+    },
+    line: new LineBot(() => ctx, async () => ({ channelSecret: SECRET, channelAccessToken: TOKEN }), () => client),
+  };
+  let e = 0;
+  const post = async (events: unknown[]) => {
+    const raw = JSON.stringify({ destination: 'Ubot', events: events.map((x) => ({ webhookEventId: `ev-${++e}`, mode: 'active', source: { type: 'user', userId: 'U-farmer' }, replyToken: `rt-${e}`, ...(x as object) })) });
+    return ctx.line!.handleWebhook(raw, signLineBody(raw, SECRET));
+  };
+  const say = (t: string, userId = 'U-farmer') => post([{ type: 'message', source: { type: 'user', userId }, message: { type: 'text', text: t } }]);
+  const tap = (data: string, userId = 'U-farmer') => post([{ type: 'postback', source: { type: 'user', userId }, postback: { data } }]);
+  const last = () => sent.at(-1)!;
+  return { ctx, store, sent, post, say, tap, last };
+}
+
+const asText = (m: LineMessage) => JSON.stringify(m);
+const buttons = (m: LineMessage): { label: string; data: string }[] => {
+  const footer = ((m.contents as { footer?: { contents?: { action?: { label: string; data: string } }[] } })?.footer?.contents ?? []).flatMap((b) => (b.action ? [b.action] : []));
+  return footer.map((a) => ({ label: a.label, data: a.data }));
+};
+const ROOF = 'ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 16.8 บาท/กก.';
+
+describe('บทสนทนา LINE ตั้งแต่พิมพ์ผลผลิตถึงอนุมัติ', () => {
+  it('ลายเซ็นผิด → 401 ไม่ทำอะไร, Verify (events ว่าง) → 200', async () => {
+    const { ctx, sent, store } = setup();
+    const raw = JSON.stringify({ events: [{ type: 'message', replyToken: 'rt', source: { type: 'user', userId: 'U1' }, message: { type: 'text', text: ROOF } }] });
+    expect((await ctx.line!.handleWebhook(raw, 'bad-signature')).status).toBe(401);
+    expect((await ctx.line!.handleWebhook(raw, undefined)).status).toBe(401);
+    expect(sent).toHaveLength(0);
+    expect(store.deals.size).toBe(0);
+    const empty = JSON.stringify({ destination: 'U', events: [] });
+    expect((await ctx.line!.handleWebhook(empty, signLineBody(empty, SECRET))).status).toBe(200);
+  });
+
+  it('ยังไม่ตั้งค่า secret → 503 (ไม่ล้มทั้งระบบ)', async () => {
+    const bot = new LineBot(() => ({}) as AppContext, async () => { throw new Error('missing'); });
+    expect(await bot.handleWebhook('{}', 'x')).toMatchObject({ status: 503 });
+  });
+
+  it('follow/ทักทาย → คำแนะนำ, ข้อมูลไม่ครบ → ถามเพิ่ม', async () => {
+    const { post, say, last } = setup();
+    await post([{ type: 'follow' }]);
+    expect(asText(last().messages[0]!)).toContain('ขั้นต่ำ');
+    await say('ข้าวหอมมะลิ 12 ตัน');
+    expect(asText(last().messages[0]!)).toContain('ราคาสุทธิขั้นต่ำ');
+    await say('สวัสดี');
+    expect(asText(last().messages[0]!)).toContain('รองรับ');
+  });
+
+  it('พิมพ์ผลผลิต → ปุ่มยืนยัน → เจรจา → push ผลครั้งเดียวพร้อม 3 ปุ่ม → อนุมัติ → ตกลงดีล', async () => {
+    const { say, tap, sent, store, ctx, last } = setup();
+    await say(ROOF);
+    expect(last().kind).toBe('reply');
+    expect(buttons(last().messages[0]!).map((b) => b.label)).toEqual(['ยืนยัน เริ่มเจรจา', 'แก้ไข']);
+    expect(store.deals.size).toBe(0); // ยังไม่เริ่มจนกว่าจะกดยืนยัน
+
+    await tap(postbackData('confirm'));
+    expect(asText(last().messages[0]!)).toContain('เริ่มเจรจา');
+    const pushes = sent.filter((s) => s.kind === 'push');
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]!.to).toBe('U-farmer');
+    const offer = pushes[0]!.messages[0]!;
+    expect(buttons(offer).map((b) => b.label)).toEqual(['อนุมัติ', 'ไม่เอา', 'ต่อรองใหม่']);
+    expect(asText(offer)).toContain('จำลอง');
+
+    const deal = (await store.getDeal('deal-1'))!;
+    expect(deal).toMatchObject({ status: 'pending_approval', lineUserId: 'U-farmer', lineFarmerId: 'F01' });
+    expect(deal.listingOverrides?.[0]).toMatchObject({ farmerId: 'F01', quantityKg: 12_000, floorPricePerKg: 16.8 });
+
+    await tap(buttons(offer)[0]!.data);
+    expect(asText(last().messages[0]!)).toContain('ตกลงครบทุกคน');
+    const after = (await store.getDeal('deal-1'))!;
+    expect(after).toMatchObject({ status: 'agreed', deliveryStatus: 'not_started', paymentStatus: 'not_due' });
+    expect(Object.keys(after.approvals).sort()).toEqual(['F01', 'F02', 'F03', 'F04']);
+
+    // ledger ยังต่อ hash chain ถูกต้อง และคนที่เป็นตัวจำลองถูกติดป้ายไว้
+    const events = await store.listEvents('deal-1');
+    expect(() => Ledger.from(events)).not.toThrow();
+    const approvals = events.filter((e) => e.type === 'approval.approve');
+    expect(approvals.find((e) => e.data.farmerId === 'F01')!.data.simulated).toBeUndefined();
+    expect(approvals.filter((e) => e.data.simulated === true).map((e) => e.data.farmerId).sort()).toEqual(['F02', 'F03', 'F04']);
+    void ctx;
+  });
+
+  it('กดยืนยันซ้ำ/ส่ง event ซ้ำ → ไม่เกิดสองดีล', async () => {
+    const { say, tap, post, store, last } = setup();
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    await tap(postbackData('confirm'));
+    expect(asText(last().messages[0]!)).toContain('ไม่มีรายการรอยืนยัน');
+    expect(store.deals.size).toBe(1);
+
+    // LINE ส่ง webhookEventId เดิมซ้ำ
+    const ev = { webhookEventId: 'dup-1', type: 'message', replyToken: 'r', source: { type: 'user', userId: 'U-farmer' }, message: { type: 'text', text: ROOF } };
+    await post([ev]);
+    const before = (await store.getLineSession('U-farmer'))?.updatedAt;
+    await post([ev]);
+    expect((await store.getLineSession('U-farmer'))?.updatedAt).toBe(before);
+  });
+
+  it('ไม่เอา → ถอนตัว กลุ่มที่เหลือ (จำลอง) ไปต่อได้', async () => {
+    const { say, tap, sent, store, last } = setup();
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    const reject = buttons(sent.find((s) => s.kind === 'push')!.messages[0]!)[1]!;
+    await tap(reject.data);
+    expect((await store.getDeal('deal-1'))!.approvals.F01).toBe('reject');
+    expect(asText(last().messages[0]!)).toContain('ถอนตัว');
+    const status = (await store.getDeal('deal-1'))!.status;
+    expect(['agreed', 'pending_approval']).toContain(status);
+    // ตอบซ้ำไม่ได้
+    await tap(reject.data);
+    expect(asText(last().messages[0]!)).toMatch(/แล้ว/);
+  });
+
+  it('ต่อรองใหม่ → ดีลเดิมถูกยกเลิก เริ่มดีลใหม่ ส่งผลใหม่อีกครั้ง', async () => {
+    const { say, tap, sent, store } = setup();
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    const renego = buttons(sent.find((s) => s.kind === 'push')!.messages[0]!)[2]!;
+    await tap(renego.data);
+    expect((await store.getDeal('deal-1'))!.status).toBe('cancelled');
+    expect(await store.getDeal('deal-2')).toMatchObject({ round: 1, lineUserId: 'U-farmer' });
+    expect(sent.filter((s) => s.kind === 'push')).toHaveLength(2);
+    // ledger ของดีลเดิมบันทึกการต่อรองใหม่
+    expect((await store.listEvents('deal-1')).some((e) => e.type === 'deal.renegotiation_requested')).toBe(true);
+  });
+
+  it('ต่อรองใหม่ได้ไม่เกิน 3 ครั้ง', async () => {
+    const { say, tap, sent, last } = setup();
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    for (let i = 0; i < 3; i++) {
+      const latest = [...sent].reverse().find((s) => s.kind === 'push')!;
+      await tap(buttons(latest.messages[0]!)[2]!.data);
+    }
+    const latest = [...sent].reverse().find((s) => s.kind === 'push')!;
+    await tap(buttons(latest.messages[0]!)[2]!.data);
+    expect(asText(last().messages[0]!)).toContain('ไม่เกิน 3 ครั้ง');
+  });
+
+  it('คนอื่นกดปุ่มของดีลคนอื่นไม่ได้', async () => {
+    const { say, tap, sent, store, last } = setup();
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    const approve = buttons(sent.find((s) => s.kind === 'push')!.messages[0]!)[0]!;
+    await tap(approve.data, 'U-intruder');
+    expect(asText(last().messages[0]!)).toContain('ไม่พบดีลนี้');
+    expect((await store.getDeal('deal-1'))!.approvals).toEqual({});
+    await tap(postbackData('approve', 'no-such-deal'));
+    expect(asText(last().messages[0]!)).toContain('ไม่พบดีลนี้');
+  });
+
+  it('จัดกลุ่มไม่ได้ (เกรด B มะระไม่มีเพื่อน) → แจ้งตรงๆ ไม่หักโควตา และกดยืนยันใหม่ได้', async () => {
+    const { say, tap, store, last } = setup();
+    await say('มะระจีน 1.8 ตัน เกรด B ขั้นต่ำ 18 บาท/กก.');
+    await tap(postbackData('confirm'));
+    expect(asText(last().messages[0]!)).toContain('เกรด A');
+    expect(store.deals.size).toBe(0);
+    expect(store.counters.size).toBe(0);
+    expect((await store.getLineSession('U-farmer'))?.draft).toBeDefined();
+  });
+
+  it('โควตาเต็ม → แจ้งผู้ใช้ และไม่สร้างดีล', async () => {
+    const { say, tap, store, last } = setup({ dailyLimit: 0 });
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    expect(asText(last().messages[0]!)).toContain('โควตา');
+    expect(store.deals.size).toBe(0);
+  });
+
+  it('เจรจาไม่ได้ข้อสรุป (ราคาขั้นต่ำสูงเกินตลาด) → แจ้งเหตุผล ไม่มีดีล มีปุ่มลองใหม่', async () => {
+    const { say, tap, sent, store } = setup();
+    await say('ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 60 บาท/กก.');
+    await tap(postbackData('confirm'));
+    const deal = (await store.getDeal('deal-1'))!;
+    expect(deal.status).toBe('failed');
+    const msgs = sent.filter((s) => s.kind === 'push').flatMap((s) => s.messages);
+    expect(msgs.map(asText).join(' ')).toContain('ไม่มีดีลใดถูกสร้าง');
+    expect(msgs.flatMap(buttons).map((b) => b.label)).toContain('ต่อรองใหม่');
+  });
+
+  it('ผลที่ส่งให้เกษตรกรไม่เปิดเผยราคาขั้นต่ำของคนอื่นในกลุ่ม', async () => {
+    const { say, tap, sent } = setup();
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    const text = sent.filter((s) => s.kind === 'push').map((s) => asText(s.messages[0]!)).join(' ');
+    for (const others of ['16.50', '17.00', '16.20', '15.50']) expect(text).not.toContain(`${others} บาท/กก. ✓`);
+    expect(text).toContain('16.80 บาท/กก. ✓ ผ่าน'); // ของตัวเองเท่านั้น
+  });
+
+  it('สถานะ → บอกสถานะดีลล่าสุด', async () => {
+    const { say, tap, last } = setup();
+    await say('สถานะ');
+    expect(asText(last().messages[0]!)).toContain('ยังไม่มีดีล');
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    await say('สถานะ');
+    expect(asText(last().messages[0]!)).toContain('รอคุณอนุมัติ');
+  });
+
+  it('ข้อความที่ไม่ใช่ตัวอักษร และแชตกลุ่ม ไม่ทำให้พัง', async () => {
+    const { post, sent, last } = setup();
+    await post([{ type: 'message', message: { type: 'image' } }]);
+    expect(asText(last().messages[0]!)).toContain('ข้อความตัวอักษร');
+    const before = sent.length;
+    await post([{ type: 'message', source: { type: 'group', groupId: 'G1' }, message: { type: 'text', text: ROOF } }]);
+    expect(sent.length).toBe(before);
+  });
+});
+
+describe('HTTP: /line/webhook', () => {
+  const evt = (body: string, headers: Record<string, string>, path = '/line/webhook') =>
+    ({ rawPath: path, headers, requestContext: { http: { method: 'POST' } }, body, isBase64Encoded: false }) as unknown as APIGatewayProxyEventV2;
+
+  it('ตรวจลายเซ็นจาก header (ตัวพิมพ์เล็ก) ทั้งสอง path', async () => {
+    const { ctx } = setup();
+    const raw = JSON.stringify({ destination: 'U', events: [] });
+    for (const path of ['/line/webhook', '/api/line/webhook']) {
+      expect((await handleHttp(ctx, evt(raw, { 'x-line-signature': signLineBody(raw, SECRET) }, path))).statusCode).toBe(200);
+    }
+    expect((await handleHttp(ctx, evt(raw, { 'x-line-signature': 'nope' }))).statusCode).toBe(401);
+    expect((await handleHttp(ctx, evt(raw, {}))).statusCode).toBe(401);
+  });
+
+  it('body ที่ถูก base64 โดย API Gateway ก็ตรวจลายเซ็นกับ body ดิบได้', async () => {
+    const { ctx } = setup();
+    const raw = JSON.stringify({ destination: 'U', events: [] });
+    const e = { rawPath: '/line/webhook', headers: { 'x-line-signature': signLineBody(raw, SECRET) }, requestContext: { http: { method: 'POST' } }, body: Buffer.from(raw).toString('base64'), isBase64Encoded: true };
+    expect((await handleHttp(ctx, e as unknown as APIGatewayProxyEventV2)).statusCode).toBe(200);
+  });
+
+  it('ไม่ได้ตั้ง LINE → 503', async () => {
+    const { ctx } = setup();
+    delete ctx.line;
+    expect((await handleHttp(ctx, evt('{}', {}))).statusCode).toBe(503);
+  });
+});

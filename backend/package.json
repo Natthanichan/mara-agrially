@@ -29,6 +29,7 @@
     "@aws-sdk/client-bedrock-runtime": "^3.1153.0",
     "@aws-sdk/client-dynamodb": "^3.1154.0",
     "@aws-sdk/client-lambda": "^3.1154.0",
+    "@aws-sdk/client-ssm": "^3.1156.0",
     "@aws-sdk/lib-dynamodb": "^3.1154.0",
     "esbuild": "^0.25.10"
   }

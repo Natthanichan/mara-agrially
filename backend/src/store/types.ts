@@ -1,10 +1,26 @@
 // ที่เก็บข้อมูลดีล — ตอนเทสใช้ memory, บน AWS ใช้ DynamoDB (ตารางเดียว on-demand)
 import type { LedgerEvent } from '../core/ledger.js';
 import type { DealStatus } from '../core/stateMachine.js';
-import type { Crop } from '../core/types.js';
+import type { Crop, Grade, Listing } from '../core/types.js';
 import type { AgentMetrics, AgentOutcome } from '../agent/loop.js';
 
 export type ApprovalDecision = 'approve' | 'reject';
+
+/** ผลผลิตที่เกษตรกรพิมพ์ใน LINE รอกดยืนยัน */
+export interface ListingDraft {
+  crop: Crop;
+  quantityKg: number;
+  grade: Grade;
+  /** ราคาสุทธิขั้นต่ำต่อกก. ของเกษตรกร — ข้อมูลส่วนตัว ห้ามส่งให้ผู้ซื้อ */
+  floorPricePerKg: number;
+}
+
+/** สถานะการคุยกับเกษตรกร 1 คนใน LINE */
+export interface LineSession {
+  draft?: ListingDraft;
+  lastDealId?: string;
+  updatedAt: string;
+}
 
 export interface DealRecord {
   id: string;
@@ -22,6 +38,13 @@ export interface DealRecord {
   deliveryStatus?: string;
   paymentStatus?: string;
   error?: string;
+  /** ดีลที่เริ่มจาก LINE: ผู้ใช้ LINE ที่เล่นบทเกษตรกร และเกษตรกรในกลุ่มที่เขาสวมบทบาท */
+  lineUserId?: string;
+  lineFarmerId?: string;
+  /** ผลผลิตที่เกษตรกรใน LINE พิมพ์ — ใช้แทนรายการจำลองของเกษตรกรคนนั้นเฉพาะดีลนี้ */
+  listingOverrides?: Listing[];
+  /** รอบการเจรจาใหม่ต่อจากดีลเดิม (0 = ดีลแรก) */
+  round?: number;
 }
 
 export interface DealStore {
@@ -38,4 +61,8 @@ export interface DealStore {
   appendEventIfNew(dealId: string, e: LedgerEvent): Promise<boolean>;
   /** นับจำนวนการเจรจาต่อวัน คืน false ถ้าเกินโควตา (กันค่าใช้จ่าย Bedrock บาน) */
   takeDailyQuota(date: string, limit: number): Promise<boolean>;
+  getLineSession(userId: string): Promise<LineSession | undefined>;
+  putLineSession(userId: string, s: LineSession): Promise<void>;
+  /** จดว่า webhook event นี้ถูกประมวลผลแล้ว คืน false ถ้าเคยจดไว้ (กัน LINE ส่งซ้ำแล้วเริ่มดีลซ้ำ) */
+  claimWebhookEvent(eventId: string): Promise<boolean>;
 }
