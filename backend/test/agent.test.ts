@@ -221,11 +221,27 @@ describe('หยุดอย่างปลอดภัย', () => {
     expect(res.outcome).toMatchObject({ kind: 'failed', reason: expect.stringContaining('ครบจำนวนขั้น') });
   });
 
-  it('LLM ตอบแต่ข้อความ ไม่เลือกทำอะไร → เตือน 1 ครั้ง แล้วหยุด', async () => {
+  it('LLM ตอบแต่ข้อความ ไม่เลือกทำอะไร → เตือน 2 ครั้ง แล้วหยุด', async () => {
     const llm = scripted([() => [{ text: 'คิดอยู่…' }]]);
     const res = await runNegotiation(input(), deps(), llm);
-    expect(llm.calls).toBe(2);
+    expect(llm.calls).toBe(3);
     expect(res.outcome).toMatchObject({ kind: 'failed', reason: expect.stringContaining('ไม่ได้เลือก') });
+  });
+
+  it('ตอบเป็นข้อความล้วนแล้วถูกเตือน → บอกผู้ซื้อที่ยังไม่ได้ขอใบเสนอราคา และทำต่อได้', async () => {
+    let nudge = '';
+    const llm = scripted([
+      () => [tool('request_quote', { buyer_id: 'B-A' })],
+      () => [{ text: 'B-A ไม่ผ่าน จะขอจากรายอื่นต่อ' }], // เขียนแผนแต่ไม่เรียก tool
+      (req) => ((nudge = req.messages.at(-1)!.content.map((b) => ('text' in b ? b.text : '')).join(' ')), [tool('request_quote', { buyer_id: 'B-C' })]),
+      () => [tool('escalate_to_farmers', { reason: 'test' })],
+    ]);
+    const res = await runNegotiation(input(), deps(), llm);
+    expect(nudge).toContain('ต้องจบด้วยการเรียก tool');
+    expect(nudge).toContain('B-B');
+    expect(nudge).toContain('B-C');
+    expect(nudge).not.toMatch(/ผู้ซื้อที่ยังไม่ได้ขอใบเสนอราคา: [^\n]*B-A/);
+    expect(res.outcome.kind).toBe('escalated');
   });
 });
 

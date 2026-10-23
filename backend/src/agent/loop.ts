@@ -73,6 +73,24 @@ const ACTOR: Record<string, LedgerActor> = {
   status_changed: 'system',
 };
 
+const MAX_NUDGES = 2;
+
+/** เตือนเมื่อโมเดลเขียนแผนเป็นข้อความแต่ไม่เรียก tool (เจอจริงบน Nova) พร้อมบอกทางเลือกที่เป็นรูปธรรมจากสถานะจริง */
+function nudgeText(st: NegotiationState, deps: AgentDeps): string {
+  const contacted = new Set([...st.sessions.values()].map((s) => s.buyerId));
+  const todo = deps.buyers
+    .listBuyers(st.input.group.crop, st.input.group.grade, st.totalKg)
+    .map((b) => b.id)
+    .filter((id) => !contacted.has(id));
+  return [
+    'คุณตอบเป็นข้อความโดยไม่ได้เรียก tool ทุกขั้นต้องจบด้วยการเรียก tool อย่างน้อย 1 ตัว เขียนแผนในข้อความอย่างเดียวไม่พอ ให้ลงมือทำเลย เลือกอย่างใดอย่างหนึ่ง:',
+    todo.length ? `- request_quote กับผู้ซื้อที่ยังไม่ได้ขอใบเสนอราคา: ${todo.join(', ')}` : '- (ขอใบเสนอราคาครบทุกรายแล้ว)',
+    '- submit_counter กับผู้ซื้อที่ยังมีโอกาสผ่านขั้นต่ำ',
+    '- prepare_deal_for_approval กับข้อเสนอที่ผ่านขั้นต่ำทุกคนแล้ว',
+    '- escalate_to_farmers ถ้าไม่มีข้อเสนอที่ผ่านและไม่เหลือทางเจรจา',
+  ].join('\n');
+}
+
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 export async function runNegotiation(
@@ -118,7 +136,7 @@ export async function runNegotiation(
 
   const messages: Message[] = [{ role: 'user', content: [{ text: initialBrief(st) }] }];
   let outcome: AgentOutcome | undefined;
-  let nudged = false;
+  let nudges = 0; // ครั้งที่เตือนแล้วเมื่อโมเดลตอบเป็นข้อความล้วนโดยไม่เรียก tool
 
   const callLlm = async (): Promise<LlmResponse> => {
     let lastErr: unknown;
@@ -177,12 +195,12 @@ export async function runNegotiation(
 
     const uses = content.filter(isToolUse);
     if (!uses.length) {
-      if (nudged) {
+      if (nudges >= MAX_NUDGES) {
         outcome = { kind: 'failed', reason: 'AI ไม่ได้เลือกการกระทำต่อ' };
         break;
       }
-      nudged = true;
-      messages.push({ role: 'user', content: [{ text: 'กรุณาเรียก tool เพื่อทำขั้นต่อไป หรือ prepare_deal_for_approval / escalate_to_farmers ถ้าได้ข้อสรุปแล้ว' }] });
+      nudges += 1;
+      messages.push({ role: 'user', content: [{ text: nudgeText(st, deps) }] });
       continue;
     }
 
