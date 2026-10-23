@@ -48,7 +48,8 @@ export class DynamoDealStore implements DealStore {
   async updateDeal(id: string, patch: Partial<DealRecord>, expectStatus?: DealRecord['status']) {
     const entries = Object.entries(patch).filter(([k, v]) => v !== undefined && k !== 'id');
     if (!entries.length) return true;
-    const names: Record<string, string> = { '#status': 'status' };
+    // DynamoDB ปฏิเสธคำสั่งที่ประกาศ ExpressionAttributeNames แต่ไม่ได้ใช้ → ใส่ #status เฉพาะตอนมีเงื่อนไขสถานะ
+    const names: Record<string, string> = {};
     const values: Record<string, unknown> = {};
     const sets = entries.map(([k, v], i) => {
       names[`#f${i}`] = k;
@@ -57,6 +58,7 @@ export class DynamoDealStore implements DealStore {
     });
     let cond = 'attribute_exists(pk)';
     if (expectStatus) {
+      names['#status'] = 'status';
       cond += ' AND #status = :expect';
       values[':expect'] = expectStatus;
     }
