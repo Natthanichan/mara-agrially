@@ -157,14 +157,16 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     expect(await bot.handleWebhook('{}', 'x')).toMatchObject({ status: 503 });
   });
 
-  it('follow/ทักทาย → คำแนะนำ, ข้อมูลไม่ครบ → ถามเพิ่ม', async () => {
-    const { post, say, last } = setup();
+  it('follow/ทักทาย → เลือกบทบาท, เกษตรกรข้อมูลไม่ครบ → ถามเพิ่ม', async () => {
+    const { post, say, tap, last } = setup();
     await post([{ type: 'follow' }]);
+    expect(buttons(last().messages[0]!).map((b) => b.label)).toEqual(['ฉันเป็นเกษตรกร', 'ฉันเป็นผู้ซื้อ']);
+    await tap(postbackData('role_farmer'));
     expect(asText(last().messages[0]!)).toContain('ขั้นต่ำ');
     await say('ข้าวหอมมะลิ 12 ตัน');
     expect(asText(last().messages[0]!)).toContain('ราคาสุทธิขั้นต่ำ');
     await say('สวัสดี');
-    expect(asText(last().messages[0]!)).toContain('รองรับ');
+    expect(buttons(last().messages[0]!).map((b) => b.label)).toContain('ฉันเป็นผู้ซื้อ');
   });
 
   it('พิมพ์ผลผลิต → ปุ่มยืนยัน → เจรจา → push ผลครั้งเดียวพร้อม 3 ปุ่ม → อนุมัติ → ตกลงดีล', async () => {
@@ -354,5 +356,132 @@ describe('HTTP: /line/webhook', () => {
     const { ctx } = setup();
     delete ctx.line;
     expect((await handleHttp(ctx, evt('{}', {}))).statusCode).toBe(503);
+  });
+});
+
+describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บอทถามทีละข้อ แล้วบันทึกคำขอซื้อ', () => {
+  const flow = async (h: ReturnType<typeof setup>, opts: { crop?: string } = {}) => {
+    await h.tap(postbackData('role_buyer'));
+    await h.tap(postbackData('buyer_crop', undefined, (opts.crop ?? 'rice_hommali') as never));
+    await h.say('10 ตัน');
+    await h.say('โรงสี ต.บางพลี จ.สมุทรปราการ');
+    await h.say('18.5');
+  };
+
+  it('กดปุ่มผู้ซื้อ → ถามพืช (ปุ่ม 3 ชนิด) → จำนวน → สถานที่ → ราคา → สรุปให้ยืนยัน → บันทึก', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_buyer'));
+    expect(buttons(h.last().messages[0]!)).toHaveLength(3);
+    await h.tap(postbackData('buyer_crop', undefined, 'rice_hommali'));
+    expect(asText(h.last().messages[0]!)).toContain('เท่าไหร่');
+    await h.say('10 ตัน');
+    expect(asText(h.last().messages[0]!)).toContain('ส่งมอบที่ไหน');
+    await h.say('โรงสี ต.บางพลี จ.สมุทรปราการ');
+    expect(asText(h.last().messages[0]!)).toContain('กี่บาท');
+    await h.say('18.5');
+    const confirm = h.last().messages[0]!;
+    expect(buttons(confirm).map((b) => b.label)).toEqual(['ยืนยันคำขอซื้อ', 'แก้ไข']);
+    expect(asText(confirm)).toContain('ข้าวเปลือกหอมมะลิ');
+    expect(asText(confirm)).toContain('18.50');
+    expect(h.store.buyerRequests).toHaveLength(0); // ยังไม่บันทึกจนกว่าจะกดยืนยัน
+
+    await h.tap(postbackData('buyer_confirm'));
+    expect(h.store.buyerRequests).toHaveLength(1);
+    expect(h.store.buyerRequests[0]).toMatchObject({ userId: 'U-farmer', crop: 'rice_hommali', quantityKg: 10_000, location: 'โรงสี ต.บางพลี จ.สมุทรปราการ', offerPerKg: 18.5, status: 'open' });
+    const saved = asText(h.last().messages[0]!);
+    expect(saved).toContain('บันทึกคำขอซื้อแล้ว');
+    expect(saved).toContain('เกษตรกร 5 ราย'); // ภาพรวมผลผลิตจำลอง
+    expect(saved).toContain('กำลังพัฒนา'); // บอกตรงๆ ว่าการคุยต่อรองยังไม่เสร็จ
+    // ไม่มีราคาขั้นต่ำของเกษตรกรหลุดไปถึงผู้ซื้อ
+    for (const floor of ['16.80', '16.50', '17.00', '16.20', '15.50']) expect(saved).not.toContain(floor);
+    expect((await h.store.getLineSession('U-farmer'))?.buyerDraft).toBeUndefined();
+  });
+
+  it('พิมพ์ชื่อพืชแทนการกดปุ่มได้ และคำตอบผิดรูปแบบจะถูกถามซ้ำโดยไม่ข้ามขั้น', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_buyer'));
+    await h.say('ทุเรียน');
+    expect(asText(h.last().messages[0]!)).toContain('ยังไม่ทราบ');
+    await h.say('มะระจีน');
+    expect(asText(h.last().messages[0]!)).toContain('มะระจีน');
+    await h.say('5'); // ไม่มีหน่วยและน้อยเกินไป
+    expect(asText(h.last().messages[0]!)).toContain('ระบุหน่วย');
+    await h.say('2 ตัน');
+    await h.say('x');
+    expect(asText(h.last().messages[0]!)).toContain('ขอสถานที่');
+    await h.say('ตลาดไท จ.ปทุมธานี');
+    await h.say('ฟรี');
+    expect(asText(h.last().messages[0]!)).toContain('ตัวเลขราคา');
+    await h.say('0');
+    expect(asText(h.last().messages[0]!)).toContain('ระหว่าง');
+    await h.say('ราคา 22 บาท/กก.');
+    expect(buttons(h.last().messages[0]!).map((b) => b.label)).toContain('ยืนยันคำขอซื้อ');
+  });
+
+  it('กดยืนยันซ้ำไม่บันทึกซ้ำ · แก้ไขเริ่มถามใหม่ · ยกเลิกล้างร่าง', async () => {
+    const h = setup();
+    await flow(h);
+    await h.tap(postbackData('buyer_confirm'));
+    await h.tap(postbackData('buyer_confirm'));
+    expect(h.store.buyerRequests).toHaveLength(1);
+    expect(asText(h.last().messages[0]!)).toContain('ไม่มีคำขอซื้อที่รอยืนยัน');
+
+    await flow(h, { crop: 'cassava' });
+    await h.tap(postbackData('buyer_edit'));
+    expect(buttons(h.last().messages[0]!)).toHaveLength(3);
+    await h.say('ยกเลิก');
+    expect((await h.store.getLineSession('U-farmer'))?.buyerDraft).toBeUndefined();
+    expect(h.store.buyerRequests).toHaveLength(1);
+  });
+
+  it('คำขอของฉัน แสดงเฉพาะของตัวเอง · ผู้ใช้คนละคนไม่ปนกัน', async () => {
+    const h = setup();
+    await flow(h);
+    await h.tap(postbackData('buyer_confirm'));
+    await h.say('คำขอของฉัน');
+    expect(asText(h.last().messages[0]!)).toContain('ส่งที่ โรงสี ต.บางพลี');
+    await h.say('อะไรก็ได้', 'U-other'); // ผู้ใช้ใหม่ที่ยังไม่เลือกบทบาท → ให้เลือกบทบาทก่อน
+    expect(buttons(h.last().messages[0]!).map((b) => b.label)).toEqual(['ฉันเป็นเกษตรกร', 'ฉันเป็นผู้ซื้อ']);
+    await h.tap(postbackData('role_buyer'), 'U-other');
+    await h.say('คำขอของฉัน', 'U-other');
+    expect(asText(h.last().messages[0]!)).toContain('ยังไม่มีคำขอซื้อ');
+  });
+
+  it('เปลี่ยนบทบาทด้วย "เมนู" และบทบาทไม่หายตอนเกษตรกรใช้งานต่อ', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.say(ROOF);
+    await h.tap(postbackData('confirm'));
+    expect((await h.store.getLineSession('U-farmer'))?.role).toBe('farmer');
+    expect(h.store.deals.size).toBe(1);
+
+    await h.say('เมนู');
+    expect((await h.store.getLineSession('U-farmer'))?.role).toBeUndefined();
+    await h.tap(postbackData('role_buyer'));
+    // ผู้ซื้อพิมพ์ข้อความผลผลิตแบบเกษตรกรไม่ได้สร้างดีล
+    await h.say(ROOF);
+    expect(h.store.deals.size).toBe(1);
+  });
+
+  it('น้องมะระเป็นผู้หญิง: ข้อความของบอททุกแบบไม่มี "ครับ" หรือ "ผม"', async () => {
+    const h = setup();
+    await h.post([{ type: 'follow' }]);
+    await h.tap(postbackData('role_farmer'));
+    await h.say('ข้าวหอมมะลิ 12 ตัน');
+    await h.say(ROOF);
+    await h.tap(postbackData('confirm'));
+    await h.tap(postbackData('confirm'));
+    await h.tap(postbackData('edit'));
+    await h.say('สถานะ');
+    await h.tap(postbackData('role_buyer'));
+    await h.say('ทุเรียน');
+    await flow(h);
+    await h.tap(postbackData('buyer_confirm'));
+    await h.say('คำขอของฉัน');
+    await h.post([{ type: 'message', message: { type: 'image' } }]);
+    const all = h.sent.flatMap((m) => m.messages.map(asText)).join(' ');
+    expect(all.length).toBeGreaterThan(2000);
+    expect(all).not.toMatch(/ครับ|ผม(?!ลิต|ลไม้)/);
+    expect(all).toContain('ค่ะ');
   });
 });

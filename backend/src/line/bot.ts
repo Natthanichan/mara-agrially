@@ -1,7 +1,9 @@
-// บทสนทนา LINE ของน้องมะระ
+// บทสนทนา LINE ของน้องมะระ (ผู้หญิง: หนู/ค่ะ/คะ) — เลือกบทบาทเกษตรกรหรือผู้ซื้อ
+// ฝั่งเกษตรกร:
 //   พิมพ์ผลผลิต → สรุป + ปุ่มยืนยัน → เริ่มเจรจา → (เจรจาเสร็จ) ส่งผลครั้งเดียวพร้อมปุ่ม [อนุมัติ] [ไม่เอา] [ต่อรองใหม่]
 // ตัวเลขเงินทั้งหมดมาจาก service (โค้ดคำนวณ) — ไฟล์นี้แค่แปลงเป็นข้อความ ไม่คิดเงินเอง
 // สมาชิกกลุ่มคนอื่นเป็นตัวจำลอง อนุมัติอัตโนมัติและติดป้าย simulated ใน ledger
+// ฝั่งผู้ซื้อ (คนจริง): บอทถามทีละข้อ ผลผลิต → ปริมาณ → สถานที่ส่ง → ราคาที่เสนอ → ยืนยัน แล้วบันทึกคำขอซื้อ
 
 import {
   AppError,
@@ -16,8 +18,30 @@ import {
 } from '../app/service.js';
 import type { LineMessage, LineSecrets } from './client.js';
 import { LineClient } from './client.js';
-import { confirmMessage, failedMessage, helpMessage, offerMessage, parsePostback, problemsMessage, startedMessage, text, MOCK_NOTE } from './flex.js';
-import { parseListing } from './parse.js';
+import { randomUUID } from 'node:crypto';
+import type { Crop } from '../core/types.js';
+import { farmers, listings } from '../data/synthetic.js';
+import type { BuyerDraft, LineSession } from '../store/types.js';
+import {
+  buyerAskLocation,
+  buyerAskPrice,
+  buyerAskQuantity,
+  buyerConfirmMessage,
+  buyerCropMessage,
+  buyerRequestsMessage,
+  buyerSavedMessage,
+  confirmMessage,
+  failedMessage,
+  helpMessage,
+  offerMessage,
+  parsePostback,
+  problemsMessage,
+  roleMessage,
+  startedMessage,
+  text,
+  MOCK_NOTE,
+} from './flex.js';
+import { parseBuyerCrop, parseBuyerLocation, parseBuyerPrice, parseBuyerQuantity, parseListing } from './parse.js';
 import { verifyLineSignature } from './signature.js';
 
 interface LineEvent {
@@ -32,7 +56,19 @@ interface LineEvent {
 
 const GREETING = /^(เมนู|วิธีใช้|ช่วยเหลือ|help|สวัสดี|สวัสดีครับ|สวัสดีค่ะ|หวัดดี|hi|hello)$/i;
 const STATUS = /^(สถานะ|status)$/i;
+const CANCEL = /^(ยกเลิก|cancel)$/i;
+const MY_REQUESTS = /^(คำขอของฉัน|คำขอซื้อ|รายการของฉัน)$/;
 const MAX_EVENTS = 20;
+
+const completeBuyerDraft = (d: BuyerDraft) =>
+  d.crop && d.quantityKg !== undefined && d.location && d.offerPerKg !== undefined ? { crop: d.crop, quantityKg: d.quantityKg, location: d.location, offerPerKg: d.offerPerKg } : undefined;
+
+/** ภาพรวมผลผลิตของพืชนี้ในระบบ (ข้อมูลจำลอง) — ไม่มีราคาขั้นต่ำของใคร */
+function supplyOf(crop: Crop) {
+  const ls = listings.filter((l) => l.crop === crop);
+  const provinces = [...new Set(ls.flatMap((l) => farmers.find((f) => f.id === l.farmerId)?.province ?? []))];
+  return { farmers: new Set(ls.map((l) => l.farmerId)).size, totalKg: ls.reduce((n, l) => n + l.quantityKg, 0), provinces };
+}
 
 const STATUS_TH: Record<string, string> = {
   queued: 'รอเริ่มเจรจา',
@@ -75,7 +111,7 @@ export class LineBot implements LineHooks {
       } catch (e) {
         // คืน 200 เสมอเมื่อลายเซ็นถูก กันไม่ให้เกิดการส่งซ้ำวนไปมา — ผู้ใช้ได้ข้อความขอโทษแทน
         console.error('line event failed:', ev.type, (e as Error).message);
-        await this.safeReply(client, ev.replyToken, [text('ขอโทษครับ ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งได้เลย')]);
+        await this.safeReply(client, ev.replyToken, [text('ขอโทษค่ะ ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งได้เลย')]);
       }
     }
     return { status: 200 };
@@ -89,9 +125,9 @@ export class LineBot implements LineHooks {
 
     const reply = (messages: LineMessage[]) => client.reply(ev.replyToken!, messages);
     try {
-      if (ev.type === 'follow') return await reply([helpMessage()]);
+      if (ev.type === 'follow') return await reply([roleMessage()]);
       if (ev.type === 'message') {
-        if (ev.message?.type !== 'text' || typeof ev.message.text !== 'string') return await reply([text('ส่งเป็นข้อความตัวอักษรนะครับ เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”')]);
+        if (ev.message?.type !== 'text' || typeof ev.message.text !== 'string') return await reply([text('ส่งเป็นข้อความตัวอักษรนะคะ เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”')]);
         return await this.onText(userId, ev.message.text.slice(0, 1000), reply);
       }
       if (ev.type === 'postback' && ev.postback?.data) return await this.onPostback(userId, ev.postback.data, reply);
@@ -101,20 +137,77 @@ export class LineBot implements LineHooks {
     }
   }
 
+  /** แก้เฉพาะฟิลด์ที่ระบุ (undefined = ลบ) โดยไม่ทำให้ฟิลด์อื่นของ session หาย เช่น บทบาท */
+  private async save(userId: string, patch: { [K in keyof Omit<LineSession, 'updatedAt'>]?: LineSession[K] | undefined }) {
+    const { store } = this.getCtx();
+    const next: Record<string, unknown> = { ...(await store.getLineSession(userId)), ...patch };
+    for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
+    await store.putLineSession(userId, { ...next, updatedAt: this.now() } as LineSession);
+  }
+
   private async onText(userId: string, raw: string, reply: (m: LineMessage[]) => Promise<void>) {
     const t = raw.trim();
     const { store } = this.getCtx();
-    if (GREETING.test(t)) return reply([helpMessage()]);
+    if (GREETING.test(t)) {
+      await this.save(userId, { role: undefined, draft: undefined, buyerDraft: undefined });
+      return reply([roleMessage()]);
+    }
+    if (CANCEL.test(t)) {
+      await this.save(userId, { draft: undefined, buyerDraft: undefined });
+      return reply([text('ยกเลิกแล้วค่ะ พิมพ์ “เมนู” เพื่อเริ่มใหม่ได้เลย')]);
+    }
+    const session = await store.getLineSession(userId);
+    if (session?.role === 'buyer') return this.onBuyerText(userId, t, session, reply);
+
     if (STATUS.test(t)) {
-      const s = await store.getLineSession(userId);
-      const deal = s?.lastDealId ? await store.getDeal(s.lastDealId) : undefined;
-      return reply([text(deal ? `ดีลล่าสุดของคุณ: ${STATUS_TH[deal.status] ?? deal.status}` : 'ยังไม่มีดีลครับ พิมพ์ผลผลิตของคุณมาได้เลย')]);
+      const deal = session?.lastDealId ? await store.getDeal(session.lastDealId) : undefined;
+      return reply([text(deal ? `ดีลล่าสุดของคุณ: ${STATUS_TH[deal.status] ?? deal.status}` : 'ยังไม่มีดีลค่ะ พิมพ์ผลผลิตของคุณมาได้เลย')]);
     }
     const r = parseListing(t);
-    if (!r.ok) return reply([r.problems.length >= 3 ? helpMessage() : problemsMessage(r.problems)]);
-    const prev = await store.getLineSession(userId);
-    await store.putLineSession(userId, { draft: r.draft, ...(prev?.lastDealId ? { lastDealId: prev.lastDealId } : {}), updatedAt: this.now() });
+    // ยังไม่ได้เลือกบทบาท และข้อความไม่เกี่ยวกับผลผลิตเลย → ให้เลือกบทบาทก่อน
+    if (!r.ok) return reply([r.problems.length >= 3 ? (session?.role ? helpMessage() : roleMessage()) : problemsMessage(r.problems)]);
+    await this.save(userId, { draft: r.draft });
     return reply([confirmMessage(r.draft, r.gradeAssumed)]);
+  }
+
+  /** ผู้ซื้อ (คนจริง) ตอบทีละข้อ: พืช → ปริมาณ → สถานที่ส่ง → ราคาที่เสนอ → ยืนยัน */
+  private async onBuyerText(userId: string, t: string, session: LineSession, reply: (m: LineMessage[]) => Promise<void>) {
+    if (MY_REQUESTS.test(t)) return reply([buyerRequestsMessage(await this.getCtx().store.listBuyerRequests(userId, 5))]);
+    const d = session.buyerDraft;
+    if (!d) {
+      await this.save(userId, { buyerDraft: { step: 'crop' } });
+      return reply([buyerCropMessage()]);
+    }
+    switch (d.step) {
+      case 'crop': {
+        const r = parseBuyerCrop(t);
+        if (!r.ok) return reply([text(r.problem), buyerCropMessage()]);
+        await this.save(userId, { buyerDraft: { step: 'quantity', crop: r.value } });
+        return reply([buyerAskQuantity(r.value)]);
+      }
+      case 'quantity': {
+        const r = parseBuyerQuantity(t);
+        if (!r.ok) return reply([text(r.problem)]);
+        await this.save(userId, { buyerDraft: { ...d, step: 'location', quantityKg: r.value } });
+        return reply([buyerAskLocation()]);
+      }
+      case 'location': {
+        const r = parseBuyerLocation(t);
+        if (!r.ok) return reply([text(r.problem)]);
+        await this.save(userId, { buyerDraft: { ...d, step: 'price', location: r.value } });
+        return reply([buyerAskPrice()]);
+      }
+      case 'price': {
+        const r = parseBuyerPrice(t);
+        if (!r.ok) return reply([text(r.problem)]);
+        const next: BuyerDraft = { ...d, step: 'confirm', offerPerKg: r.value };
+        await this.save(userId, { buyerDraft: next });
+        const full = completeBuyerDraft(next);
+        return reply(full ? [buyerConfirmMessage(full)] : [text('ข้อมูลไม่ครบค่ะ ขอเริ่มใหม่นะคะ'), buyerCropMessage()]);
+      }
+      default:
+        return reply([text('กดปุ่ม “ยืนยันคำขอซื้อ” หรือ “แก้ไข” ในข้อความด้านบนได้เลยค่ะ หรือพิมพ์ “ยกเลิก”')]);
+    }
   }
 
   private async onPostback(userId: string, data: string, reply: (m: LineMessage[]) => Promise<void>) {
@@ -123,23 +216,49 @@ export class LineBot implements LineHooks {
     const ctx = this.getCtx();
     const { store } = ctx;
 
+    if (pb.act === 'role_farmer') {
+      await this.save(userId, { role: 'farmer', buyerDraft: undefined });
+      return reply([helpMessage()]);
+    }
+    if (pb.act === 'role_buyer' || pb.act === 'buyer_edit') {
+      await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'crop' } });
+      return reply([buyerCropMessage()]);
+    }
+    if (pb.act === 'buyer_crop') {
+      if (!pb.crop) return;
+      await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'quantity', crop: pb.crop } });
+      return reply([buyerAskQuantity(pb.crop)]);
+    }
+    if (pb.act === 'buyer_confirm') {
+      const session = await store.getLineSession(userId);
+      const full = session?.buyerDraft?.step === 'confirm' ? completeBuyerDraft(session.buyerDraft) : undefined;
+      if (!full) return reply([text('ไม่มีคำขอซื้อที่รอยืนยันค่ะ พิมพ์อะไรมาก็ได้เพื่อเริ่มลงทะเบียนใหม่')]);
+      await this.save(userId, { buyerDraft: undefined }); // ล้างก่อน กันกดยืนยันซ้ำแล้วบันทึกสองรายการ
+      try {
+        await store.createBuyerRequest({ id: (ctx.newId ?? randomUUID)(), userId, ...full, status: 'open', createdAt: this.now() });
+      } catch (e) {
+        await this.save(userId, { buyerDraft: session!.buyerDraft });
+        throw e;
+      }
+      return reply([buyerSavedMessage(full, supplyOf(full.crop))]);
+    }
+
     if (pb.act === 'edit') {
-      const prev = await store.getLineSession(userId);
-      await store.putLineSession(userId, { ...(prev?.lastDealId ? { lastDealId: prev.lastDealId } : {}), updatedAt: this.now() });
-      return reply([text('ได้ครับ พิมพ์ผลผลิตใหม่ได้เลย เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”')]);
+      await this.save(userId, { draft: undefined });
+      return reply([text('ได้ค่ะ พิมพ์ผลผลิตใหม่ได้เลย เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”')]);
     }
 
     if (pb.act === 'confirm') {
       const session = await store.getLineSession(userId);
       const draft = session?.draft;
-      if (!draft) return reply([text('ไม่มีรายการรอยืนยันครับ พิมพ์ผลผลิตของคุณมาใหม่ได้เลย')]);
+      if (!draft) return reply([text('ไม่มีรายการรอยืนยันค่ะ พิมพ์ผลผลิตของคุณมาใหม่ได้เลย')]);
       // ล้างร่างก่อนเริ่ม กันกดยืนยันซ้ำแล้วเกิดสองดีล
-      await store.putLineSession(userId, { ...(session.lastDealId ? { lastDealId: session.lastDealId } : {}), updatedAt: this.now() });
+      await this.save(userId, { draft: undefined });
       try {
         const { id } = await startDeal(ctx, {}, { line: { userId, draft } });
-        await store.putLineSession(userId, { lastDealId: id, updatedAt: this.now() });
+        await this.save(userId, { lastDealId: id });
       } catch (e) {
-        await store.putLineSession(userId, { ...session, updatedAt: this.now() }); // ให้กดยืนยันซ้ำได้ (เช่น โควตาเต็ม)
+        await this.save(userId, { draft }); // ให้กดยืนยันซ้ำได้ (เช่น โควตาเต็ม)
         throw e;
       }
       return reply([startedMessage()]);
@@ -148,18 +267,18 @@ export class LineBot implements LineHooks {
     // อนุมัติ / ไม่เอา / ต่อรองใหม่ ต้องมี dealId และต้องเป็นดีลของผู้ใช้คนนี้เท่านั้น
     if (!pb.dealId) return;
     const deal = await store.getDeal(pb.dealId);
-    if (!deal || deal.lineUserId !== userId || !deal.lineFarmerId) return reply([text('ไม่พบดีลนี้ในรายการของคุณครับ')]);
+    if (!deal || deal.lineUserId !== userId || !deal.lineFarmerId) return reply([text('ไม่พบดีลนี้ในรายการของคุณค่ะ')]);
     const farmerId = deal.lineFarmerId;
 
     if (pb.act === 'renegotiate') {
       const { id } = await renegotiate(ctx, pb.dealId, userId);
-      await store.putLineSession(userId, { lastDealId: id, updatedAt: this.now() });
-      return reply([text('ได้ครับ น้องมะระเริ่มเจรจาใหม่ให้แล้ว 🔁 ใช้เวลาประมาณ 1–2 นาที ผมจะส่งผลให้ดูอีกครั้ง')]);
+      await this.save(userId, { lastDealId: id });
+      return reply([text('ได้ค่ะ น้องมะระเริ่มเจรจาใหม่ให้แล้ว 🔁 ใช้เวลาประมาณ 1–2 นาที หนูจะส่งผลให้ดูอีกครั้ง')]);
     }
 
-    if (deal.status !== 'pending_approval') return reply([text(`ดีลนี้${STATUS_TH[deal.status] ?? deal.status}แล้ว กดอนุมัติหรือไม่เอาอีกไม่ได้ครับ`)]);
+    if (deal.status !== 'pending_approval') return reply([text(`ดีลนี้${STATUS_TH[deal.status] ?? deal.status}แล้ว กดอนุมัติหรือไม่เอาอีกไม่ได้ค่ะ`)]);
     const decided = deal.approvals[farmerId];
-    if (decided) return reply([text(`คุณตอบดีลนี้ไปแล้ว (${decided === 'approve' ? 'อนุมัติ' : 'ไม่เอา'}) ครับ`)]);
+    if (decided) return reply([text(`คุณตอบดีลนี้ไปแล้ว (${decided === 'approve' ? 'อนุมัติ' : 'ไม่เอา'}) ค่ะ`)]);
 
     await recordApproval(ctx, pb.dealId, { farmerId, decision: pb.act });
     const r = await approveSimulatedMembers(ctx, pb.dealId, farmerId);

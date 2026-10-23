@@ -6,6 +6,8 @@
 //   NABC        / <YYYY-MM-DD>     snapshot ราคาตลาดรายวัน (ใช้วิเคราะห์ต่อได้)
 //   LINE#<uid>  / SESSION          สถานะคุยกับเกษตรกรใน LINE (ร่างผลผลิตรอยืนยัน) — มี ttl
 //   LINEEVENT   / <webhookEventId> กัน LINE ส่ง event ซ้ำ — มี ttl
+//   BUYERREQ#<uid>        / <createdAt>#<id>  ความต้องการซื้อของผู้ซื้อ (ดูของตัวเอง)
+//   BUYERREQ#OPEN#<crop>  / <createdAt>#<id>  ดัชนีตามพืช (ไว้จับคู่แจ้งเตือนผู้ซื้อในขั้นต่อไป)
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -19,7 +21,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { LedgerEvent } from '../core/ledger.js';
 import type { NabcRecord, SnapshotStore } from '../market/nabcClient.js';
-import type { DealRecord, DealStore, LineSession } from './types.js';
+import type { BuyerRequest, DealRecord, DealStore, LineSession } from './types.js';
 
 type Doc = Pick<DynamoDBDocumentClient, 'send'>;
 
@@ -177,6 +179,19 @@ export class DynamoDealStore implements DealStore {
     // เก็บ 30 วันแล้วให้ DynamoDB ลบเอง (TTL)
     const ttl = Math.floor(Date.now() / 1000) + 30 * 86_400;
     await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `LINE#${userId}`, sk: 'SESSION', ttl, ...s } }));
+  }
+
+  async createBuyerRequest(r: BuyerRequest) {
+    const sk = `${r.createdAt}#${r.id}`;
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREQ#${r.userId}`, sk, ...r } }));
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREQ#OPEN#${r.crop}`, sk, id: r.id, userId: r.userId, quantityKg: r.quantityKg, offerPerKg: r.offerPerKg } }));
+  }
+
+  async listBuyerRequests(userId: string, limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREQ#${userId}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerRequest);
   }
 
   async claimWebhookEvent(eventId: string) {

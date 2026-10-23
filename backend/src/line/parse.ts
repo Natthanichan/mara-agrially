@@ -76,3 +76,46 @@ export function parseListing(raw: string): ParseResult {
   const grade = findGrade(t);
   return { ok: true, gradeAssumed: grade === undefined, draft: { crop, quantityKg: Math.round(quantityKg * 100) / 100, grade: grade ?? 'A', floorPricePerKg: Math.round(floor * 100) / 100 } };
 }
+
+// ---------- ฝั่งผู้ซื้อ: ตอบทีละข้อ (แต่ละคำตอบมีข้อมูลเดียว จึงอ่านง่ายกว่าข้อความอิสระ) ----------
+
+export type Field<T> = { ok: true; value: T } | { ok: false; problem: string };
+
+export function parseBuyerCrop(raw: string): Field<Crop> {
+  const c = findCrop(normalize(raw));
+  if (c === undefined) return { ok: false, problem: 'ยังไม่ทราบว่าต้องการพืชอะไรคะ (รองรับ ข้าวหอมมะลิ, มะระจีน, มันสำปะหลัง)' };
+  if (c === 'ambiguous') return { ok: false, problem: 'พบพืชมากกว่า 1 ชนิด ขอทีละชนิดนะคะ' };
+  return { ok: true, value: c };
+}
+
+/** รับ "10 ตัน", "10000 กก." หรือเลขเปล่า (ตั้งแต่ 100 ขึ้นไปถือเป็นกก.) */
+export function parseBuyerQuantity(raw: string): Field<number> {
+  const t = normalize(raw);
+  let kg = findQuantityKg(t);
+  if (kg === undefined) {
+    const bare = new RegExp(`^${NUM}$`).exec(t);
+    if (bare) {
+      const n = toNumber(bare[1]!);
+      if (n < QUANTITY_LIMITS.minKg) return { ok: false, problem: 'ช่วยระบุหน่วยด้วยนะคะ เช่น 10 ตัน หรือ 10000 กก.' };
+      kg = n;
+    }
+  }
+  if (kg === undefined) return { ok: false, problem: 'ยังไม่ทราบปริมาณค่ะ ตอบเช่น 10 ตัน หรือ 10000 กก.' };
+  if (!(kg >= QUANTITY_LIMITS.minKg && kg <= QUANTITY_LIMITS.maxKg)) return { ok: false, problem: `ปริมาณต้องอยู่ระหว่าง ${QUANTITY_LIMITS.minKg.toLocaleString('en-US')} ถึง ${QUANTITY_LIMITS.maxKg.toLocaleString('en-US')} กก. ค่ะ` };
+  return { ok: true, value: Math.round(kg * 100) / 100 };
+}
+
+export function parseBuyerLocation(raw: string): Field<string> {
+  const v = normalize(raw).replace(/\s+/g, ' ').replace(/^(ส่ง(ที่|ไป)?|สถานที่(ส่ง)?)\s*/, '');
+  if (v.length < 2) return { ok: false, problem: 'ขอสถานที่ส่งมอบหน่อยค่ะ เช่น โรงสี ต.บางพลี จ.สมุทรปราการ' };
+  if (v.length > 100) return { ok: false, problem: 'ที่อยู่ยาวเกินไปค่ะ ขอไม่เกิน 100 ตัวอักษร' };
+  return { ok: true, value: v };
+}
+
+export function parseBuyerPrice(raw: string): Field<number> {
+  const m = new RegExp(`^(?:ราคา)?\\s*${NUM}\\s*(?:บาท)?\\s*(?:/|ต่อ)?\\s*(?:กก\\.?|กิโลกรัม|กิโล|kg)?$`, 'i').exec(normalize(raw));
+  if (!m) return { ok: false, problem: 'ขอเป็นตัวเลขราคาต่อกก. ค่ะ เช่น 18.5' };
+  const n = toNumber(m[1]!);
+  if (!(n >= FLOOR_LIMITS.minBaht && n <= FLOOR_LIMITS.maxBaht)) return { ok: false, problem: `ราคาต้องอยู่ระหว่าง ${FLOOR_LIMITS.minBaht} ถึง ${FLOOR_LIMITS.maxBaht} บาท/กก. ค่ะ` };
+  return { ok: true, value: Math.round(n * 100) / 100 };
+}

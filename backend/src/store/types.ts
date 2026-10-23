@@ -15,9 +15,35 @@ export interface ListingDraft {
   floorPricePerKg: number;
 }
 
-/** สถานะการคุยกับเกษตรกร 1 คนใน LINE */
+export type LineRole = 'farmer' | 'buyer';
+
+/** ผู้ซื้อ (คนจริงใน LINE) กำลังตอบคำถามทีละข้อเพื่อลงทะเบียนความต้องการซื้อ */
+export interface BuyerDraft {
+  step: 'crop' | 'quantity' | 'location' | 'price' | 'confirm';
+  crop?: Crop;
+  quantityKg?: number;
+  location?: string;
+  /** ราคาที่ผู้ซื้อเสนอซื้อ (บาท/กก.) */
+  offerPerKg?: number;
+}
+
+/** ความต้องการซื้อที่ผู้ซื้อลงทะเบียนไว้ */
+export interface BuyerRequest {
+  id: string;
+  userId: string;
+  crop: Crop;
+  quantityKg: number;
+  location: string;
+  offerPerKg: number;
+  status: 'open';
+  createdAt: string;
+}
+
+/** สถานะการคุยกับผู้ใช้ LINE 1 คน (เกษตรกรหรือผู้ซื้อ) */
 export interface LineSession {
+  role?: LineRole;
   draft?: ListingDraft;
+  buyerDraft?: BuyerDraft;
   lastDealId?: string;
   updatedAt: string;
 }
@@ -65,4 +91,7 @@ export interface DealStore {
   putLineSession(userId: string, s: LineSession): Promise<void>;
   /** จดว่า webhook event นี้ถูกประมวลผลแล้ว คืน false ถ้าเคยจดไว้ (กัน LINE ส่งซ้ำแล้วเริ่มดีลซ้ำ) */
   claimWebhookEvent(eventId: string): Promise<boolean>;
+  createBuyerRequest(r: BuyerRequest): Promise<void>;
+  /** คำขอซื้อของผู้ใช้คนนี้ ใหม่สุดก่อน */
+  listBuyerRequests(userId: string, limit: number): Promise<BuyerRequest[]>;
 }

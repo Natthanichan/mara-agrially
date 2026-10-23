@@ -1,9 +1,10 @@
 import type { LedgerEvent } from '../core/ledger.js';
-import type { DealRecord, DealStore, LineSession } from './types.js';
+import type { BuyerRequest, DealRecord, DealStore, LineSession } from './types.js';
 
 export class MemoryDealStore implements DealStore {
   sessions = new Map<string, LineSession>();
   webhookEvents = new Set<string>();
+  buyerRequests: BuyerRequest[] = [];
   deals = new Map<string, DealRecord>();
   events = new Map<string, LedgerEvent[]>();
   counters = new Map<string, number>();
@@ -62,6 +63,12 @@ export class MemoryDealStore implements DealStore {
   }
   async putLineSession(userId: string, s: LineSession) {
     this.sessions.set(userId, structuredClone(s));
+  }
+  async createBuyerRequest(r: BuyerRequest) {
+    this.buyerRequests.push(structuredClone(r));
+  }
+  async listBuyerRequests(userId: string, limit: number) {
+    return this.buyerRequests.filter((r) => r.userId === userId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit).map((r) => structuredClone(r));
   }
   async claimWebhookEvent(eventId: string) {
     if (this.webhookEvents.has(eventId)) return false;
