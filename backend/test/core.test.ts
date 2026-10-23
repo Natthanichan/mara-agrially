@@ -148,3 +148,28 @@ describe('Ledger', () => {
     expect(() => ((l.list()[0] as { type: string }).type = 'x')).toThrow();
   });
 });
+
+describe('Ledger: hash ไม่ขึ้นกับลำดับคีย์ (เจอจริงบน DynamoDB ที่ไม่รักษาลำดับคีย์ของ map)', () => {
+  const reverseKeys = (v: unknown): unknown =>
+    Array.isArray(v) ? v.map(reverseKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).reverse().map(([k, x]) => [k, reverseKeys(x)])) : v;
+
+  const build = () => {
+    const l = new Ledger(() => new Date('2026-10-23T00:00:00Z'));
+    l.append({ dealId: 'D', actor: 'agent', type: 'agent.plan', data: { zeta: 1, alpha: { y: 2, x: [{ b: 1, a: 2 }] }, mid: 'x' } });
+    l.append({ dealId: 'D', actor: 'farmer', actorId: 'F01', type: 'approval.approve', data: { farmerId: 'F01', decision: 'approve' } });
+    return l;
+  };
+
+  it('อ่านกลับจากฐานข้อมูลที่คีย์สลับลำดับ แล้วยังตรวจผ่านและต่อท้ายได้', () => {
+    const stored = build().list().map((e) => ({ ...e, data: reverseKeys(e.data) as Record<string, unknown> }));
+    const l = Ledger.from(stored, () => new Date('2026-10-23T00:00:00Z'));
+    expect(l.verify().ok).toBe(true);
+    expect(() => l.append({ dealId: 'D', actor: 'system', type: 'deal.agreed', data: {} })).not.toThrow();
+  });
+
+  it('ยังจับการแก้ไขข้อมูลได้เหมือนเดิม', () => {
+    const stored = build().list().map((e) => ({ ...e, data: reverseKeys(e.data) as Record<string, unknown> }));
+    stored[0] = { ...stored[0]!, data: { ...stored[0]!.data, zeta: 999 } };
+    expect(() => Ledger.from(stored)).toThrow('hash chain');
+  });
+});

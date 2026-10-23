@@ -19,8 +19,24 @@ export interface LedgerEvent {
 
 const GENESIS = '0'.repeat(64);
 
+/**
+ * เรียงคีย์ของ object ทุกระดับตามตัวอักษร ก่อนนำไปคิด hash
+ * DynamoDB ไม่รักษาลำดับคีย์ของ map เมื่ออ่านกลับ — ถ้า hash ขึ้นกับลำดับที่ใส่คีย์ ledger ที่อ่านจากฐานข้อมูลจะตรวจไม่ผ่านทั้งที่ไม่มีใครแก้
+ */
+const canonical = (v: unknown): unknown =>
+  Array.isArray(v)
+    ? v.map(canonical)
+    : v && typeof v === 'object'
+      ? Object.fromEntries(
+          Object.entries(v)
+            .filter(([, x]) => x !== undefined)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+            .map(([k, x]) => [k, canonical(x)]),
+        )
+      : v;
+
 const hashOf = (e: Omit<LedgerEvent, 'hash'>) =>
-  createHash('sha256').update(JSON.stringify([e.seq, e.at, e.dealId, e.actor, e.actorId ?? null, e.type, e.data, e.prevHash])).digest('hex');
+  createHash('sha256').update(JSON.stringify([e.seq, e.at, e.dealId, e.actor, e.actorId ?? null, e.type, canonical(e.data), e.prevHash])).digest('hex');
 
 export class Ledger {
   private events: LedgerEvent[] = [];
