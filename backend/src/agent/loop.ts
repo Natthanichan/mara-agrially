@@ -16,7 +16,7 @@ export interface AgentLimits {
 }
 
 export const DEFAULT_LIMITS: AgentLimits = {
-  maxSteps: 14,
+  maxSteps: 18,
   llmTimeoutMs: 20_000,
   llmRetries: 1,
   maxTokensPerCall: 1200,
@@ -207,6 +207,16 @@ export async function runNegotiation(
     // Converse API ต้องการ toolResult ครบทุก toolUse — ที่ข้ามไปให้ตอบว่าไม่ได้ทำ
     for (const u of uses.slice(results.length)) {
       results.push({ toolResult: { toolUseId: u.toolUse.toolUseId, content: [{ json: { skipped: 'งานจบแล้ว' } }], status: 'error' } });
+    }
+    // บอกโมเดลว่าเหลืออีกกี่ขั้น และเมื่อใกล้หมดให้สรุปเลย (เจอจริงบน Nova: ค้นข้อมูลวนจนหมดขั้นโดยไม่ได้สรุป)
+    const left = limits.maxSteps - m.steps;
+    if (!st.terminal) {
+      results.push({
+        text:
+          left <= 3
+            ? `[ระบบ] เหลืออีก ${left} ขั้น ต้องสรุปตอนนี้: เรียก prepare_deal_for_approval กับข้อเสนอที่ผ่านขั้นต่ำทุกคนและดีที่สุดที่มี หรือ escalate_to_farmers ถ้าไม่มีข้อเสนอที่ผ่าน`
+            : `[ระบบ] ใช้ไป ${m.steps}/${limits.maxSteps} ขั้น เหลืออีก ${left} ขั้น`,
+      });
     }
     messages.push({ role: 'user', content: results });
 

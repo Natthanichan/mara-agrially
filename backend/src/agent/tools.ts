@@ -74,6 +74,8 @@ const describeDeduction = (d: Deduction) =>
 export class NegotiationState {
   readonly sessions = new Map<string, BuyerSession>();
   readonly violations: GuardrailViolation[] = [];
+  /** จำนวนครั้งที่ค้นความรู้ไปแล้ว (จำกัดไว้ ไม่งั้นโมเดลค้นวนจนหมดขั้นก่อนได้เจรจา) */
+  searches = 0;
   terminal?: Terminal;
   market?: MarketReference | null;
   readonly members;
@@ -137,6 +139,9 @@ export class NegotiationState {
     return nums;
   }
 }
+
+/** ค้นความรู้ได้กี่ครั้งต่อการเจรจา 1 ดีล */
+export const MAX_KNOWLEDGE_SEARCHES = 3;
 
 export const TOOL_SPECS: ToolSpec[] = [
   {
@@ -251,6 +256,10 @@ export async function executeTool(
     }
 
     case 'search_knowledge': {
+      if (st.searches >= MAX_KNOWLEDGE_SEARCHES) {
+        throw new ToolError(`ค้นความรู้ครบ ${MAX_KNOWLEDGE_SEARCHES} ครั้งแล้ว ให้ใช้ข้อมูลที่ได้ไปต่อ: ขอใบเสนอราคา ประเมิน และเจรจาได้เลย`);
+      }
+      st.searches += 1;
       const buyer = typeof input.buyer_id === 'string' && input.buyer_id ? input.buyer_id : undefined;
       const r = deps.knowledge.search(str(input.query, 'query'), { topK: 3, filter: { crop: group.crop, ...(buyer ? { buyer } : {}) } });
       return { mode: r.mode, results: r.hits.map((h) => ({ source: `${h.source} › ${h.heading}`, text: h.text, disclaimer: h.disclaimer })) };

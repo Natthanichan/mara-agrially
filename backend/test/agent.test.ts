@@ -244,3 +244,38 @@ describe('ส่วนประกอบย่อย', () => {
     expect(checkMessageLeak('ต่ำสุด 17', [17.0])).toMatchObject({ code: 'private_data_leak' });
   });
 });
+
+describe('งบขั้นตอนของ Agent (เจอจริงบน Nova: ค้นข้อมูลวนจนหมด 14 ขั้นโดยไม่ได้สรุป)', () => {
+  const noteOf = (req: LlmRequest) =>
+    req.messages
+      .at(-1)!
+      .content.filter((b): b is { text: string } => 'text' in b)
+      .map((b) => b.text)
+      .join(' ');
+
+  it('ค้นความรู้ได้ไม่เกิน 3 ครั้ง ครั้งที่ 4 ได้ error ที่บอกให้ไปต่อ (ขั้นยังเหลือสำหรับเจรจา)', async () => {
+    const results: Record<string, unknown>[] = [];
+    const search = (q: string) => (req: LlmRequest) => (req.messages.length > 1 && results.push(lastResults(req)[0]!), [tool('search_knowledge', { query: q })]);
+    const llm = scripted([search('a'), search('b'), search('c'), search('d'), (req) => (results.push(lastResults(req)[0]!), [tool('escalate_to_farmers', { reason: 'test' })])]);
+    await runNegotiation(input(), deps(), llm);
+    expect(results.slice(0, 3).every((r) => Array.isArray(r.results))).toBe(true);
+    expect(String(results[3]!.error)).toContain('ครบ 3 ครั้งแล้ว');
+  });
+
+  it('บอกจำนวนขั้นที่เหลือทุกขั้น และเมื่อเหลือ ≤ 3 ให้สั่งสรุปทันที', async () => {
+    const notes: string[] = [];
+    const step = (req: LlmRequest) => (req.messages.length > 1 && notes.push(noteOf(req)), [tool('list_buyers')]);
+    const llm = scripted([step, step, step, step, step, step]);
+    const res = await runNegotiation(input(), deps(), llm, { limits: { maxSteps: 6 } });
+    expect(res.status).toBe('failed');
+    expect(notes[0]).toContain('ใช้ไป 1/6 ขั้น เหลืออีก 5 ขั้น');
+    expect(notes[1]).toContain('ใช้ไป 2/6 ขั้น เหลืออีก 4 ขั้น');
+    expect(notes[2]).toContain('เหลืออีก 3 ขั้น ต้องสรุปตอนนี้');
+    expect(notes[2]).toContain('prepare_deal_for_approval');
+  });
+
+  it('ค่าเริ่มต้น 18 ขั้น', async () => {
+    const { DEFAULT_LIMITS } = await import('../src/agent/index.js');
+    expect(DEFAULT_LIMITS.maxSteps).toBe(18);
+  });
+});
