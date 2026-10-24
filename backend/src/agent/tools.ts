@@ -3,6 +3,7 @@
 // ไม่มี tool สำหรับปิดดีล: Agent ทำได้แค่ prepare_deal_for_approval แล้วรอเกษตรกรอนุมัติ
 
 import { MockBuyerApi, MockBuyerError, type BuyerResponse } from '../buyer/mockBuyer.js';
+import { LEVEL_TH, type Reputation } from '../core/reputation.js';
 import { checkPriceFloor } from '../core/pricing.js';
 import { activeMembers } from '../core/grouping.js';
 import type { Deduction, DealTerms, Farmer, Group, Listing } from '../core/types.js';
@@ -30,6 +31,8 @@ export interface HistoryRecord {
 
 export interface HistoryProvider {
   forBuyer(buyerId: string, crop: Group['crop']): Promise<HistoryRecord[]>;
+  /** ความน่าเชื่อถือของผู้ซื้อ (จ่ายตรงเวลา/ข้อพิพาท) — ใช้ประกอบการตัดสินใจ ไม่ใช่หลักฐานอ้างกับผู้ซื้อ */
+  reputation?(buyerId: string): Promise<Reputation>;
 }
 
 export interface AgentDeps {
@@ -252,7 +255,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   },
   {
     name: 'get_negotiation_history',
-    description: 'ดูผลการเจรจาที่ระบบเคยบันทึกไว้กับผู้ซื้อรายนี้ (ราคาเปิด ราคาสุดท้าย ผล) ถ้ามี จะได้หลักฐาน E-HIST ไว้อ้าง ถ้าไม่มีประวัติ ห้ามอ้างว่าเคยซื้อขายกัน',
+    description: 'ดูผลการเจรจาที่ระบบเคยบันทึกไว้กับผู้ซื้อรายนี้ (ราคาเปิด ราคาสุดท้าย ผล) และความน่าเชื่อถือ (จ่ายตรงเวลา/ข้อพิพาท) ถ้ามีประวัติราคา จะได้หลักฐาน E-HIST ไว้อ้าง ถ้าไม่มีประวัติ ห้ามอ้างว่าเคยซื้อขายกัน · ความน่าเชื่อถือใช้ประกอบการตัดสินใจ ไม่ต้องพูดกับผู้ซื้อ',
     inputSchema: { json: { type: 'object', properties: { buyer_id: { type: 'string' } }, required: ['buyer_id'] } },
   },
   {
@@ -379,7 +382,9 @@ export async function executeTool(
     case 'get_negotiation_history': {
       const buyerId = str(input.buyer_id, 'buyer_id');
       const records = (await deps.history?.forBuyer(buyerId, group.crop)) ?? [];
-      if (!records.length) return { buyer_id: buyerId, records: [], note: 'ยังไม่มีประวัติการเจรจากับผู้ซื้อรายนี้ในระบบ ห้ามอ้างว่าเคยซื้อขายกัน' };
+      const rep = await deps.history?.reputation?.(buyerId).catch(() => undefined);
+      const reputation = rep ? { level: LEVEL_TH[rep.level], deals: rep.deals, paid_on_time: rep.onTime, paid_late: rep.late, disputes: rep.disputes, note: rep.level === 'low' ? 'ผู้ซื้อรายนี้มีประวัติจ่ายช้า/ข้อพิพาท ควรขอเครดิตสั้นลงหรือเงื่อนไขชัดเจน และแจ้งเกษตรกร' : 'ใช้ประกอบการตัดสินใจ ไม่ต้องพูดถึงกับผู้ซื้อ' } : undefined;
+      if (!records.length) return { buyer_id: buyerId, records: [], ...(reputation ? { reputation } : {}), note: 'ยังไม่มีประวัติการเจรจากับผู้ซื้อรายนี้ในระบบ ห้ามอ้างว่าเคยซื้อขายกัน' };
       const last = records[0]!;
       const e = st.evidence.add({
         id: `E-HIST-${buyerId}`,
@@ -392,7 +397,7 @@ export async function executeTool(
         tag: 'buyer_history',
         extraNumbers: [...records.flatMap((r) => [r.openingPerKg, r.finalPerKg]), ...dateNumbers(last.at)],
       });
-      return { buyer_id: buyerId, evidence: st.evidence.brief([e]), records: records.slice(0, 5) };
+      return { buyer_id: buyerId, evidence: st.evidence.brief([e]), records: records.slice(0, 5), ...(reputation ? { reputation } : {}) };
     }
 
     case 'list_buyers': {

@@ -8,20 +8,23 @@ import type { LineMessage } from './client.js';
 import { DECISION_TH, type RoundSummary } from './rounds.js';
 import { BASIS_TH, type TransportEstimate } from '../core/transportEstimate.js';
 import { expectedYieldKg, monthTh, SOIL_TH, type CropAdvice, type FarmProfile } from '../core/farmProfile.js';
+import { FEEDBACK_TH, LEVEL_TH, type FeedbackKind } from '../core/reputation.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other', 'farm_sell', 'farm_plan', 'farm_profile', 'plan_crop', 'plan_advise', 'farm_sell_profile'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other', 'farm_sell', 'farm_plan', 'farm_profile', 'plan_crop', 'plan_advise', 'farm_sell_profile', 'rate_buyer'] as const;
 export type Act = (typeof ACTS)[number];
 const CROPS: Crop[] = ALL_CROPS;
-export const postbackData = (act: Act, dealId?: string, crop?: Crop) => new URLSearchParams({ act, ...(dealId ? { d: dealId } : {}), ...(crop ? { c: crop } : {}) }).toString();
-export function parsePostback(data: string): { act: Act; dealId?: string; crop?: Crop } | undefined {
+export const postbackData = (act: Act, dealId?: string, crop?: Crop, value?: string) =>
+  new URLSearchParams({ act, ...(dealId ? { d: dealId } : {}), ...(crop ? { c: crop } : {}), ...(value ? { v: value } : {}) }).toString();
+export function parsePostback(data: string): { act: Act; dealId?: string; crop?: Crop; value?: string } | undefined {
   const p = new URLSearchParams(data);
   const act = ACTS.find((a) => a === p.get('act'));
   if (!act) return undefined;
   const d = p.get('d');
   const c = CROPS.find((x) => x === p.get('c'));
-  return { act, ...(d ? { dealId: d } : {}), ...(c ? { crop: c } : {}) };
+  const v = p.get('v');
+  return { act, ...(d ? { dealId: d } : {}), ...(c ? { crop: c } : {}), ...(v ? { value: v } : {}) };
 }
 
 const baht = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -123,6 +126,10 @@ export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string,
   const how = roundLines(x);
   const body: LineMessage[] = [
     row('ผู้ซื้อ', o.buyerName, true),
+    ...(o.buyerReputation ? [row('ความน่าเชื่อถือผู้ซื้อ', o.buyerReputation.score === undefined ? 'ผู้ซื้อใหม่' : `${o.buyerReputation.score}/100 ${LEVEL_TH[o.buyerReputation.level]}`, o.buyerReputation.level === 'low')] : []),
+    ...(o.buyerReputation && o.buyerReputation.deals
+      ? [{ type: 'text', text: `ประวัติ ${o.buyerReputation.deals} ดีล: จ่ายตรงเวลา ${o.buyerReputation.onTime} · จ่ายช้า ${o.buyerReputation.late}${o.buyerReputation.disputes ? ` · ข้อพิพาท ${o.buyerReputation.disputes}` : ''} (ประวัติจำลอง + คะแนนจากเกษตรกร)`, size: 'xxs', color: o.buyerReputation.level === 'low' ? '#B0261B' : '#666666', wrap: true }]
+      : []),
     row('ราคาที่ตกลงเบื้องต้น', `${baht(o.pricePerKg)} บาท/กก.`),
     ...(o.myGrossBaht !== undefined ? [row('ยอดก่อนหัก', `${int(o.myGrossBaht)} บาท`)] : []),
     ...(o.deductions.length ? [row('ส่วนหัก', o.deductions.join(', '))] : []),
@@ -536,4 +543,14 @@ export function farmProfileMessage(p: FarmProfile, advice: CropAdvice[]): LineMe
 export const askActualQuantity = (cropLabel: string, expectedKg?: number): LineMessage => ({
   ...text(`เก็บเกี่ยว${cropLabel}ได้จริงเท่าไหร่คะ ตอบเป็นตันหรือกิโลกรัม${expectedKg ? ` (โปรไฟล์คาดไว้ ≈ ${qty(expectedKg)})` : ''}`),
   ...(expectedKg ? { quickReply: quick([expectedKg >= 1000 ? `${(expectedKg / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })} ตัน` : `${expectedKg} กิโลกรัม`]) } : {}),
+});
+
+// ---------- Buyer Reputation ----------
+
+/** หลังส่งมอบ: เกษตรกรให้คะแนนผู้ซื้อ (ใช้กับดีลถัดไป) */
+export const rateBuyerMessage = (dealId: string, buyerName: string): LineMessage => ({
+  ...text(`หลังส่งมอบแล้ว ช่วยให้คะแนน${buyerName}หน่อยนะคะ คะแนนนี้ช่วยเพื่อนเกษตรกรตัดสินใจในดีลถัดไป (เดโม: กดได้เลยเพื่อจำลองการส่งมอบ)`),
+  quickReply: {
+    items: (Object.keys(FEEDBACK_TH) as FeedbackKind[]).map((k) => ({ type: 'action', action: { type: 'postback', label: FEEDBACK_TH[k].slice(0, 20), data: postbackData('rate_buyer', dealId, undefined, k), displayText: FEEDBACK_TH[k] } })),
+  },
 });

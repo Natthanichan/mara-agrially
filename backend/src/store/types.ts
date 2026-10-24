@@ -137,6 +137,9 @@ export interface DealStore {
   recordBuyerOutcomes(rows: BuyerOutcome[]): Promise<void>;
   /** ประวัติกับผู้ซื้อรายนี้สำหรับพืชนี้ ใหม่สุดก่อน */
   listBuyerOutcomes(buyerId: string, crop: Crop, limit: number): Promise<BuyerOutcome[]>;
+  /** คะแนนผู้ซื้อจากเกษตรกรหลังส่งมอบ (Buyer Reputation Memory) */
+  addBuyerFeedback(f: import('../core/reputation.js').BuyerFeedback): Promise<void>;
+  listBuyerFeedback(buyerId: string, limit: number): Promise<import('../core/reputation.js').BuyerFeedback[]>;
   /** สร้างกลุ่ม คืน false ถ้ารหัสนี้มีอยู่แล้ว */
   createFarmerGroup(g: FarmerGroup): Promise<boolean>;
   getFarmerGroup(code: string): Promise<FarmerGroup | undefined>;

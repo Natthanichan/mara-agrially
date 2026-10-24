@@ -2,6 +2,7 @@
 // ทุก dependency ส่งเข้ามา (store, LLM, ผู้ซื้อ, ตลาด) จึงเทสได้ครบโดยไม่ต้องใช้ AWS
 
 import { DEFAULT_BUYERS, MockBuyerApi } from '../buyer/mockBuyer.js';
+import { computeReputation, seedFeedback, type Reputation } from '../core/reputation.js';
 import { canFinalize, nextDealStatus } from '../core/stateMachine.js';
 import { checkPriceFloor, computeNetPerFarmer } from '../core/pricing.js';
 import { groupListings } from '../core/grouping.js';
@@ -127,7 +128,14 @@ export async function startDeal(ctx: AppContext, body: { crop?: unknown }, opts:
 /** ประวัติการเจรจาจริงจากที่เก็บข้อมูล → ให้ Agent อ้างเป็นหลักฐานได้ */
 const storeHistory = (store: DealStore) => ({
   forBuyer: async (buyerId: string, crop: Crop) => (await store.listBuyerOutcomes(buyerId, crop, 5)).map(({ dealId, at, openingPerKg, finalPerKg, decision, chosen }) => ({ dealId, at, openingPerKg, finalPerKg, decision, chosen })),
+  reputation: (buyerId: string) => getBuyerReputation({ store }, buyerId),
 });
+
+/** คะแนนผู้ซื้อ = ประวัติตั้งต้น (จำลอง) + คะแนนที่เกษตรกรให้หลังส่งมอบจริง */
+export async function getBuyerReputation(ctx: Pick<AppContext, 'store'>, buyerId: string): Promise<Reputation> {
+  const stored = await ctx.store.listBuyerFeedback(buyerId, 500);
+  return computeReputation(buyerId, [...seedFeedback(buyerId), ...stored]);
+}
 
 /** บันทึกราคาเปิด/ราคาสุดท้ายของผู้ซื้อแต่ละรายในดีลนี้ — ล้มเหลวได้โดยไม่กระทบผลเจรจา */
 async function recordOutcomes(ctx: AppContext, dealId: string, crop: Crop, trace: { type: string; data: Record<string, unknown> }[], outcome: { kind: string; buyerId?: string }, at: string) {
@@ -316,6 +324,9 @@ export interface FarmerOffer {
   transport?: { fromProvince: string; toProvince?: string; tripCostBaht: number; tripKg: number; tripFarmers: number; myTotalBaht: number };
   /** ยอดก่อนหักค่ารถและส่วนหัก (ราคา × ปริมาณ) */
   myGrossBaht?: number;
+  /** ความน่าเชื่อถือของผู้ซื้อ (Buyer Reputation Memory) */
+  buyerReputation?: Reputation;
+  paymentTermDays?: number;
 }
 
 /** ข้อมูลดีลที่ส่งให้เกษตรกรอ่านก่อนกดอนุมัติ */
@@ -337,7 +348,8 @@ export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: stri
   const tripKg = trip ? active.filter((m) => trip.farmerIds.includes(m.farmerId)).reduce((s, m) => s + m.quantityKg, 0) : 0;
   const fromProvince = farmers.find((f) => f.id === farmerId)?.province;
   const buyerId = deal.outcome.buyerId;
-  const toProvince = DEFAULT_BUYERS.find((b) => b.id === buyerId)?.province;
+  const buyerCfg = DEFAULT_BUYERS.find((b) => b.id === buyerId);
+  const toProvince = buyerCfg?.province;
   const transport = trip && fromProvince
     ? { fromProvince, ...(toProvince ? { toProvince } : {}), tripCostBaht: trip.totalCost, tripKg, tripFarmers: trip.farmerIds.length, myTotalBaht: Math.round(mine.transportPerKg * mine.quantityKg) }
     : undefined;
@@ -350,6 +362,8 @@ export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: stri
     ...(deal.metrics?.marketMedianPerKg !== undefined ? { marketMedianPerKg: deal.metrics.marketMedianPerKg } : {}),
     ...(transport ? { transport } : {}),
     myGrossBaht: Math.round(st.terms.pricePerKg * mine.quantityKg),
+    buyerReputation: await getBuyerReputation(ctx, buyerId),
+    ...(buyerCfg ? { paymentTermDays: buyerCfg.paymentTermDays } : {}),
   };
 }
 

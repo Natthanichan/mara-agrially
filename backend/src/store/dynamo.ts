@@ -24,6 +24,7 @@ import {
 import type { LedgerEvent } from '../core/ledger.js';
 import type { NabcRecord, SnapshotStore } from '../market/nabcClient.js';
 import type { BuyerOutcome, BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
+import type { BuyerFeedback } from '../core/reputation.js';
 
 type Doc = Pick<DynamoDBDocumentClient, 'send'>;
 
@@ -214,6 +215,17 @@ export class DynamoDealStore implements DealStore {
       new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERHIST#${buyerId}#${crop}` }, ScanIndexForward: false, Limit: limit }),
     );
     return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerOutcome);
+  }
+
+  async addBuyerFeedback(f: BuyerFeedback) {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREP#${f.buyerId}`, sk: `${f.at}#${f.dealId}`, ...f } }));
+  }
+
+  async listBuyerFeedback(buyerId: string, limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREP#${buyerId}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerFeedback);
   }
 
   async createFarmerGroup(g: FarmerGroup) {

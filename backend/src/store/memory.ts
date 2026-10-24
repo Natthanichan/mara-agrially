@@ -1,4 +1,5 @@
 import type { LedgerEvent } from '../core/ledger.js';
+import type { BuyerFeedback } from '../core/reputation.js';
 import type { BuyerOutcome, BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
 
 export class MemoryDealStore implements DealStore {
@@ -84,6 +85,13 @@ export class MemoryDealStore implements DealStore {
   }
   async listBuyerOutcomes(buyerId: string, crop: BuyerOutcome['crop'], limit: number) {
     return this.outcomes.filter((o) => o.buyerId === buyerId && o.crop === crop).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit).map((o) => structuredClone(o));
+  }
+  feedback: BuyerFeedback[] = [];
+  async addBuyerFeedback(f: BuyerFeedback) {
+    this.feedback.push(structuredClone(f));
+  }
+  async listBuyerFeedback(buyerId: string, limit: number) {
+    return this.feedback.filter((f) => f.buyerId === buyerId).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit).map((f) => structuredClone(f));
   }
   async createFarmerGroup(g: FarmerGroup) {
     if (this.groups.has(g.code)) return false;

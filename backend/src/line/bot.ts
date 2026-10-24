@@ -13,6 +13,7 @@ import {
   getDeal,
   getFarmerOffer,
   MAX_LINE_ROUNDS,
+  getBuyerReputation,
   recordApproval,
   renegotiate,
   startDeal,
@@ -76,7 +77,9 @@ import {
   planAskFloor,
   farmProfileMessage,
   askActualQuantity,
+  rateBuyerMessage,
 } from './flex.js';
+import { FEEDBACK_TH, reputationLine, type FeedbackKind } from '../core/reputation.js';
 import { expectedYieldKg, monthTh, parseRai, recommendCrops, upcomingMonths, type FarmProfile, type Soil } from '../core/farmProfile.js';
 import { negotiationRounds } from './rounds.js';
 import { estimateTransport, findProvince } from '../core/transportEstimate.js';
@@ -864,6 +867,17 @@ export class LineBot implements LineHooks {
       return reply([text('ได้ค่ะ น้องมะระเริ่มเจรจาใหม่ให้แล้ว 🔁 ใช้เวลาประมาณ 1–2 นาที หนูจะส่งผลให้ดูอีกครั้ง')]);
     }
 
+    if (pb.act === 'rate_buyer') {
+      const kind = pb.value as FeedbackKind | undefined;
+      if (deal.status !== 'agreed' || deal.outcome?.kind !== 'prepared' || !kind || !(kind in FEEDBACK_TH)) return reply([text('ให้คะแนนได้หลังดีลตกลงแล้วเท่านั้นค่ะ')]);
+      const buyerId = deal.outcome.buyerId;
+      if ((await store.listBuyerFeedback(buyerId, 500)).some((f) => f.dealId === deal.id)) return reply([text('ดีลนี้ให้คะแนนผู้ซื้อไปแล้วค่ะ ขอบคุณนะคะ')]);
+      await store.addBuyerFeedback({ buyerId, kind, dealId: deal.id, at: this.now() });
+      await appendAudit(ctx, deal.id, { actor: 'farmer', actorId: farmerId, type: 'buyer.feedback', data: { buyerId, kind } });
+      const rep = await getBuyerReputation(ctx, buyerId);
+      return reply([text(`บันทึกแล้วค่ะ ✓ ${deal.outcome.buyerName}: ${FEEDBACK_TH[kind]}\nคะแนนความน่าเชื่อถือตอนนี้ ${reputationLine(rep)}\nน้องมะระจะใช้ข้อมูลนี้ตอนเจรจาและเตือนเพื่อนเกษตรกรในดีลถัดไปค่ะ`)]);
+    }
+
     if (deal.status !== 'pending_approval') return reply([text(`ดีลนี้${STATUS_TH[deal.status] ?? deal.status}แล้ว กดอนุมัติหรือไม่เอาอีกไม่ได้ค่ะ`)]);
     const decided = deal.approvals[farmerId];
     if (decided) return reply([text(`คุณตอบดีลนี้ไปแล้ว (${decided === 'approve' ? 'อนุมัติ' : 'ไม่เอา'}) ค่ะ`)]);
@@ -875,7 +889,10 @@ export class LineBot implements LineHooks {
       if (r.status === 'agreed') {
         const s = await store.getLineSession(userId);
         if (s?.farmProfile) await this.save(userId, { farmProfile: { ...s.farmProfile, deliveries: s.farmProfile.deliveries + 1, updatedAt: this.now() } }); // ประวัติการส่งมอบ
-        return reply([text(['อนุมัติแล้ว ✓ ดีลตกลงครบทุกคน 🎉', 'สถานะ: ตกลงดีลแล้ว · ส่งมอบ: ยังไม่เริ่ม · ชำระเงิน: ยังไม่ถึงกำหนด (แยกสถานะกัน)', 'ผู้ซื้อโอนเงินตรงเข้าบัญชีของคุณหลังส่งมอบ ระบบไม่ถือเงิน', 'ทุกขั้นถูกบันทึกใน ledger แบบ hash chain', '', MOCK_NOTE].join('\n'))]);
+        return reply([
+          text(['อนุมัติแล้ว ✓ ดีลตกลงครบทุกคน 🎉', 'สถานะ: ตกลงดีลแล้ว · ส่งมอบ: ยังไม่เริ่ม · ชำระเงิน: ยังไม่ถึงกำหนด (แยกสถานะกัน)', 'ผู้ซื้อโอนเงินตรงเข้าบัญชีของคุณหลังส่งมอบ ระบบไม่ถือเงิน', 'ทุกขั้นถูกบันทึกใน ledger แบบ hash chain', '', MOCK_NOTE].join('\n')),
+          ...(deal.outcome?.kind === 'prepared' ? [rateBuyerMessage(deal.id, deal.outcome.buyerName)] : []),
+        ]);
       }
       return reply(this.notAgreed('อนุมัติแล้ว ✓ แต่ดีลยังปิดไม่ได้', r, pb.dealId));
     }

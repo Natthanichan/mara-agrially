@@ -547,6 +547,39 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
   });
 });
 
+describe('Buyer Reputation Memory', () => {
+  it('คิดคะแนนจากประวัติ: จ่ายตรงเวลาดี = สูง · จ่ายช้า+ข้อพิพาท = ต้องระวัง · ไม่มีประวัติ = ผู้ซื้อใหม่', async () => {
+    const { computeReputation, seedFeedback } = await import('../src/core/reputation.js');
+    expect(computeReputation('B-B', seedFeedback('B-B'))).toMatchObject({ score: 100, level: 'high' });
+    expect(computeReputation('B-C', seedFeedback('B-C')).level).toBe('low');
+    expect(computeReputation('X', [])).toMatchObject({ level: 'new' });
+    expect(computeReputation('X', []).score).toBeUndefined();
+  });
+
+  it('การ์ดอนุมัติแสดงความน่าเชื่อถือผู้ซื้อ · ตกลงแล้วให้คะแนนผู้ซื้อได้ 1 ครั้งต่อดีล และคะแนนเปลี่ยนจริง', async () => {
+    const h = setup();
+    await h.say(ROOF);
+    await h.tap(postbackData('confirm'));
+    const offer = h.sent.filter((x) => x.kind === 'push').at(-1)!.messages[0]!;
+    expect(asText(offer)).toContain('ความน่าเชื่อถือผู้ซื้อ');
+    await h.tap(buttons(offer)[0]!.data);
+    const rate = h.last().messages.at(-1)! as { quickReply?: { items: { action: { label: string; data: string } }[] } };
+    expect(rate.quickReply!.items.map((i) => i.action.label)).toEqual(['จ่ายตรงเวลา', 'จ่ายช้า', 'มีปัญหา/หักเงินเพิ่ม', 'ยกเลิกไม่รับของ']);
+    const deal = (await h.store.getDeal('deal-1'))!;
+    const buyerId = (deal.outcome as { buyerId: string }).buyerId;
+    const { getBuyerReputation } = await import('../src/app/service.js');
+    const before = await getBuyerReputation(h.ctx, buyerId);
+    await h.tap(rate.quickReply!.items[2]!.action.data); // มีปัญหาคุณภาพ
+    expect(asText(h.last().messages[0]!)).toContain('บันทึกแล้ว');
+    const after = await getBuyerReputation(h.ctx, buyerId);
+    expect(after.disputes).toBe(before.disputes + 1);
+    expect(after.score!).toBeLessThan(before.score!);
+    await h.tap(rate.quickReply!.items[0]!.action.data);
+    expect(asText(h.last().messages[0]!)).toContain('ให้คะแนนผู้ซื้อไปแล้ว');
+    expect((await h.store.listEvents('deal-1')).some((e) => e.type === 'buyer.feedback')).toBe(true); // อยู่ใน ledger
+  });
+});
+
 describe('Farm Profile: วางแผนปลูก → แนะนำพืช → ถึงรอบขายใช้ข้อมูลเดิม', () => {
   it('ยังไม่แน่ใจว่าจะปลูกอะไร → ถาม ไร่/ดิน/พืชรอบก่อน/จังหวัด → แนะนำพืช → เลือกพืช → เดือนเก็บเกี่ยว + ราคาขั้นต่ำ', async () => {
     const h = setup();
