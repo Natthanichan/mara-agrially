@@ -76,6 +76,8 @@ export class NegotiationState {
   readonly violations: GuardrailViolation[] = [];
   /** จำนวนครั้งที่ค้นความรู้ไปแล้ว (จำกัดไว้ ไม่งั้นโมเดลค้นวนจนหมดขั้นก่อนได้เจรจา) */
   searches = 0;
+  /** กันส่งเรื่องให้เกษตรกรก่อนลองต่อรอง — บล็อกได้ครั้งเดียว (ไม่ให้วนจนหมดขั้น) */
+  escalateBlocked = false;
   terminal?: Terminal;
   market?: MarketReference | null;
   readonly members;
@@ -365,6 +367,15 @@ export async function executeTool(
     }
 
     case 'escalate_to_farmers': {
+      // เจอจริงบน Nova: ขอใบเสนอราคาแล้วส่งเรื่องเลยโดยไม่ต่อรองสักครั้ง ทั้งที่ผู้ซื้อยังขยับราคา/ส่วนหักได้
+      const untried = [...st.sessions.values()].filter((x) => !x.closed && x.rounds === 0 && st.maxRoundsPerBuyer > 0);
+      if (untried.length && !st.escalateBlocked) {
+        st.escalateBlocked = true;
+        throw new ToolError(
+          `ยังส่งเรื่องให้เกษตรกรไม่ได้ เพราะยังไม่ได้ต่อรองกับผู้ซื้อ ${untried.map((x) => `${x.buyerId} (session ${x.sessionId}, เสนอ ${x.last.pricePerKg} บาท/กก.)`).join(', ')} ` +
+            'ข้อเสนอแรกมักต่อรองได้ ให้ submit_counter กับรายที่ราคาสุทธิใกล้ขั้นต่ำที่สุดก่อน ใช้ minGrossPriceToPassAll จาก evaluate_offer เป็นเป้า (ห้ามบอกตัวเลขนี้กับผู้ซื้อ) และถ้ามีส่วนหักแบบเหมาให้ใส่ contest_deductions',
+        );
+      }
       st.terminal = { kind: 'escalated', reason: str(input.reason, 'reason') };
       for (const s of st.sessions.values()) deps.buyers.close(s.sessionId);
       return { escalated: true };

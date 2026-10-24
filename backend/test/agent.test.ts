@@ -139,7 +139,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     const llm = scripted([
       quoteA,
       (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 16.5, message: 'ขอ 16.50' })],
-      (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
+      (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     const res = await runNegotiation(input(), deps(spy), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'below_floor' });
@@ -153,7 +153,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     const llm = scripted([
       quoteA,
       (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.5, message: 'สมาชิกบางคนรับได้ต่ำสุด 17.00 บาท' })],
-      (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
+      (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     await runNegotiation(input(), deps(), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'private_data_leak' });
@@ -164,7 +164,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     const llm = scripted([
       (req) => [tool('request_quote', { buyer_id: 'B-C' })],
       (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-C'), price_per_kg: 18.3, message: 'ขอ 18.30' })],
-      (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
+      (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     await runNegotiation(input(), deps(), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'below_buyer_offer' });
@@ -192,7 +192,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     let blocked: Record<string, unknown> | undefined;
     const counter = (req: LlmRequest) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอ 18.90' })];
     // จำกัด 2 รอบ → ครั้งที่ 3 ต้องถูกบล็อก
-    const llm = scripted([quoteA, counter, counter, counter, (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'x' })])]);
+    const llm = scripted([quoteA, counter, counter, counter, (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'x' })])]);
     await runNegotiation({ ...input(), maxRoundsPerBuyer: 2 }, deps(), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'round_limit' });
   });
@@ -293,5 +293,35 @@ describe('งบขั้นตอนของ Agent (เจอจริงบ�
   it('ค่าเริ่มต้น 18 ขั้น', async () => {
     const { DEFAULT_LIMITS } = await import('../src/agent/index.js');
     expect(DEFAULT_LIMITS.maxSteps).toBe(18);
+  });
+});
+
+describe('กันส่งเรื่องให้เกษตรกรก่อนต่อรอง (เจอจริงบน Nova)', () => {
+  it('ขอใบเสนอราคาแล้ว escalate ทันที → บล็อกครั้งแรกพร้อมบอกรายที่ยังไม่ได้ต่อรอง, ครั้งที่สองยอมให้ส่ง', async () => {
+    let first: Record<string, unknown> | undefined;
+    const llm = scripted([
+      () => [tool('request_quote', { buyer_id: 'B-A' }), tool('request_quote', { buyer_id: 'B-C' })],
+      () => [tool('escalate_to_farmers', { reason: 'ต่ำกว่าขั้นต่ำ' })],
+      (req) => ((first = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'ต่ำกว่าขั้นต่ำ' })]),
+    ]);
+    const res = await runNegotiation(input(), deps(), llm);
+    expect(String(first?.error)).toContain('ยังไม่ได้ต่อรอง');
+    expect(String(first?.error)).toContain('B-C');
+    expect(res.outcome.kind).toBe('escalated');
+  });
+
+  it('ต่อรองแล้วอย่างน้อยหนึ่งรอบกับทุกรายที่เปิดอยู่ → escalate ได้เลย', async () => {
+    const llm = scripted([
+      () => [tool('request_quote', { buyer_id: 'B-A' })],
+      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอราคาตามตลาด' })],
+      () => [tool('escalate_to_farmers', { reason: 'test' })],
+    ]);
+    const res = await runNegotiation(input(), deps(), llm);
+    expect(res.outcome.kind).toBe('escalated');
+  });
+
+  it('งบ token เริ่มต้นพอสำหรับ 18 ขั้น', async () => {
+    const { DEFAULT_LIMITS } = await import('../src/agent/index.js');
+    expect(DEFAULT_LIMITS.maxTotalTokens).toBeGreaterThanOrEqual(250_000);
   });
 });

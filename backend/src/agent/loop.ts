@@ -20,7 +20,7 @@ export const DEFAULT_LIMITS: AgentLimits = {
   llmTimeoutMs: 20_000,
   llmRetries: 1,
   maxTokensPerCall: 1200,
-  maxTotalTokens: 80_000,
+  maxTotalTokens: 250_000, // 18 ขั้นส่งประวัติสนทนาซ้ำทุกขั้น 80k ไม่พอ (เจอจริงบน Nova)
 };
 
 export interface TraceEvent {
