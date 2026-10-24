@@ -56,6 +56,17 @@ const BASE_SAY: Record<string, string> = {
   'E-LOGISTICS': 'เราจัดรถรวมส่งให้ ผู้ซื้อไม่ต้องรับทีละแปลง',
 };
 
+/** ข้อโต้แย้ง → คำอธิบายภาษาไทยสำหรับเหตุผลที่แสดงบนหน้าเว็บ */
+const CONCERN_TH: Record<string, string> = {
+  need_market_reference: 'ราคาตลาด',
+  need_volume: 'ปริมาณ',
+  need_quality_grade: 'คุณภาพและเกรด',
+  need_delivery_ready: 'การส่งมอบ',
+  need_consolidated_logistics: 'การรับสินค้าจากหลายแปลง',
+  need_competing_offer: 'ข้อเสนอของรายอื่น',
+  need_buyer_history: 'ราคาที่เคยซื้อขายกัน',
+};
+
 /** ประโยคเปิดเพื่อตอบข้อโต้แย้ง (ไม่มีตัวเลข) */
 const OBJECTION_REPLY: Record<string, string> = {
   need_market_reference: 'เรื่องราคาตลาด ขอให้ข้อมูลอ้างอิงค่ะ',
@@ -341,7 +352,7 @@ export class RuleBasedMockLlm implements LlmClient {
     }
     const want = OBJECTION_EVIDENCE[s.objection ?? ''];
     const target = want === 'market' ? (marketStrong ? 'E-MKT-MEDIAN' : undefined) : want === 'competing' ? (better ? `E-COMP-${better.buyerId}` : undefined) : want === 'history' ? hist : want;
-    if (target && has(target)) return { strategy: 'address_objection', ids: [target], why: `ผู้ซื้อกังวลเรื่อง ${s.objection} ตอบด้วยหลักฐานที่ตรงข้อกังวลโดยตรง` };
+    if (target && has(target)) return { strategy: 'address_objection', ids: [target], why: `ผู้ซื้อกังวลเรื่อง${CONCERN_TH[s.objection ?? ''] ?? 'ราคา'} ตอบด้วยหลักฐานที่ตรงข้อกังวลโดยตรง` };
     const fresh = [...(marketStrong ? ['E-MKT-MEDIAN'] : []), 'E-VOL', 'E-GRADE', 'E-DELIVERY', 'E-LOGISTICS', ...(hist ? [hist] : []), ...(better ? [`E-COMP-${better.buyerId}`] : [])].find(has);
     if (fresh) return { strategy: 'evidence_value', ids: [fresh], why: 'ข้อโต้แย้งนี้ไม่มีหลักฐานตรง ใช้หลักฐานใหม่ที่ยังไม่ได้อ้าง แทนการพูดเหตุผลเดิม' };
     return { strategy: s.objection === 'price_above_budget' ? 'conditional_concession' : 'final_push', ids: [], why: 'ใช้หลักฐานครบแล้ว ลดช่องว่างราคาลงเพื่อปิดดีลก่อนหมดรอบ' };
