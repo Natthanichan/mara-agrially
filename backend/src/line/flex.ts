@@ -1,8 +1,8 @@
 // สร้างข้อความ LINE (ข้อความธรรมดา + Flex Message ที่มีปุ่ม) — ฟังก์ชันล้วน เทสได้โดยไม่ต้องมี LINE
 
-import { CROP_LABEL_TH } from '../data/synthetic.js';
+import { CROP_LABEL_TH, CROP_SHORT_TH } from '../data/synthetic.js';
 import type { FarmerOffer } from '../app/service.js';
-import type { Crop } from '../core/types.js';
+import { ALL_CROPS, type Crop } from '../core/types.js';
 import type { BuyerDraft, BuyerRequest, ListingDraft } from '../store/types.js';
 import type { LineMessage } from './client.js';
 import { DECISION_TH, type RoundSummary } from './rounds.js';
@@ -10,9 +10,9 @@ import { BASIS_TH, type TransportEstimate } from '../core/transportEstimate.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other'] as const;
 export type Act = (typeof ACTS)[number];
-const CROPS: Crop[] = ['rice_hommali', 'bitter_gourd', 'cassava'];
+const CROPS: Crop[] = ALL_CROPS;
 export const postbackData = (act: Act, dealId?: string, crop?: Crop) => new URLSearchParams({ act, ...(dealId ? { d: dealId } : {}), ...(crop ? { c: crop } : {}) }).toString();
 export function parsePostback(data: string): { act: Act; dealId?: string; crop?: Crop } | undefined {
   const p = new URLSearchParams(data);
@@ -122,8 +122,20 @@ export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string,
   const body: LineMessage[] = [
     row('ผู้ซื้อ', o.buyerName, true),
     row('ราคาที่ตกลงเบื้องต้น', `${baht(o.pricePerKg)} บาท/กก.`),
+    ...(o.myGrossBaht !== undefined ? [row('ยอดก่อนหัก', `${int(o.myGrossBaht)} บาท`)] : []),
     ...(o.deductions.length ? [row('ส่วนหัก', o.deductions.join(', '))] : []),
-    row('ค่าขนส่งของคุณ', `${baht(m.transportPerKg)} บาท/กก.`),
+    row('ค่ารถโดยประมาณ', `${baht(m.transportPerKg)} บาท/กก.${o.transport ? ` · รวม ${int(o.transport.myTotalBaht)} บาท` : ''}`),
+    ...(o.transport
+      ? [
+          {
+            type: 'text',
+            text: `🚚 จ.${o.transport.fromProvince}${o.transport.toProvince ? ` → จ.${o.transport.toProvince}` : ''} · รถรวม 1 เที่ยว ${int(o.transport.tripCostBaht)} บาท แบ่งตามน้ำหนัก ${o.transport.tripFarmers} คน (${qty(o.transport.tripKg)}) · ค่ารถเป็นค่าประมาณ (จำลอง) ไม่ใช่ใบเสนอราคาขนส่งจริง`,
+            size: 'xxs',
+            color: '#666666',
+            wrap: true,
+          },
+        ]
+      : []),
     { type: 'separator' },
     row('คุณได้สุทธิ', `${baht(m.netPerKg)} บาท/กก.`, true),
     row('รวมที่คุณได้', `${baht(m.netTotal)} บาท (${qty(m.quantityKg)})`, true),
@@ -171,15 +183,42 @@ export const roleMessage = (): LineMessage =>
     'เลือกบทบาท: เกษตรกร หรือ ผู้ซื้อ',
   );
 
+/** ปุ่มเลือกพืชฝั่งผู้ซื้อ: ข้าว ยาง ข้าวโพด มะระ + อื่นๆ (พิมพ์เอง เช่น มันสำปะหลัง หรือพิมพ์ผิดก็เดาให้ได้) */
+export const BUYER_CROP_BUTTONS: Crop[] = ['rice_hommali', 'rubber', 'corn', 'bitter_gourd'];
 export const buyerCropMessage = (): LineMessage =>
   bubble(
-    'ผู้ซื้อ: ต้องการซื้ออะไรคะ',
-    [{ type: 'text', text: 'เลือกผลผลิตที่ต้องการ หรือพิมพ์ชื่อมาได้เลยค่ะ', size: 'sm', wrap: true }],
-    (['rice_hommali', 'bitter_gourd', 'cassava'] as Crop[]).map((c) => button(CROP_LABEL_TH[c], postbackData('buyer_crop', undefined, c), CROP_LABEL_TH[c], 'secondary')),
-    'ต้องการซื้อผลผลิตอะไร: ข้าวหอมมะลิ, มะระจีน, มันสำปะหลัง',
+    'ผู้ซื้อ: สนใจพืชอะไรคะ',
+    [{ type: 'text', text: 'กดเลือกด้านล่าง หรือกด “อื่นๆ” แล้วพิมพ์ชื่อพืชมาได้เลยค่ะ', size: 'sm', wrap: true }],
+    [
+      ...BUYER_CROP_BUTTONS.map((c) => button(CROP_SHORT_TH[c], postbackData('buyer_crop', undefined, c), CROP_SHORT_TH[c], 'secondary')),
+      button('อื่นๆ (พิมพ์เอง)', postbackData('buyer_crop_other'), 'อื่นๆ', 'secondary'),
+    ],
+    'สนใจพืชอะไร: ข้าว ยาง ข้าวโพด มะระ หรืออื่นๆ',
   );
 
+/** ข้อความ + ปุ่มลัด "สนใจ เจรจา" (ทุกข้อความที่บอกให้กดสนใจต้องมีปุ่มให้กดจริง) */
+export const withInterestButton = (t: string, crop: Crop): LineMessage => ({
+  ...text(t),
+  quickReply: { items: [{ type: 'action', action: { type: 'postback', label: `สนใจ เจรจา${CROP_SHORT_TH[crop]}`.slice(0, 20), data: postbackData('buyer_negotiate', undefined, crop), displayText: 'สนใจ เจรจากับกลุ่มนี้' } }] },
+});
+
+/** เดาพืชจากคำที่พิมพ์ผิด → ถามยืนยันด้วยปุ่ม */
+export const cropGuessMessage = (note: string, crop: Crop): LineMessage => ({
+  ...text(note.replace('ถ้าไม่ใช่กดแก้ไขได้เลยค่ะ', 'ใช่ไหมคะ')),
+  quickReply: {
+    items: [
+      { type: 'action', action: { type: 'postback', label: `ใช่ ${CROP_SHORT_TH[crop]}`.slice(0, 20), data: postbackData('buyer_crop', undefined, crop), displayText: `ใช่ ${CROP_LABEL_TH[crop]}` } },
+      { type: 'action', action: { type: 'postback', label: 'ไม่ใช่ เลือกใหม่', data: postbackData('buyer_edit'), displayText: 'ไม่ใช่ เลือกใหม่' } },
+    ],
+  },
+});
+
 export const buyerAskQuantity = (crop: Crop) => text(`ต้องการ${CROP_LABEL_TH[crop]}เท่าไหร่คะ ตอบเป็นตันหรือกิโลกรัมได้เลย เช่น “10 ตัน” หรือ “10000 กก.”`);
+/** ผู้ใช้พิมพ์เลขเปล่า → ให้กดเลือกหน่วย (ผู้สูงอายุกดง่ายกว่าพิมพ์) */
+export const unitChoiceMessage = (problem: string, n: number): LineMessage => {
+  const v = n.toLocaleString('en-US');
+  return { ...text(problem), quickReply: { items: [`${v} กิโลกรัม`, `${v} ตัน`].map((l) => ({ type: 'action', action: { type: 'message', label: l.slice(0, 20), text: l } })) } };
+};
 export const buyerAskLocation = () => text('ส่งมอบที่ไหนคะ ตอบสถานที่ได้เลย เช่น “โรงสี ต.บางพลี จ.สมุทรปราการ”');
 /** ราคาอ้างอิงตลาดสำหรับช่วยผู้ซื้อตั้งราคา (จาก NABC) */
 export interface PriceHint {
@@ -297,7 +336,11 @@ export function buyerMatchesMessages(req: Pick<BuyerRequest, 'crop' | 'quantityK
       altText: `กลุ่มเกษตรกรที่ตรงกับคำขอของคุณ ${sorted.length} กลุ่ม`,
       contents: { type: 'carousel', contents: sorted.map((g) => groupBubble(g, req, 'กลุ่มเกษตรกรที่ตรงกับคำขอ')) },
     },
-    text('กด “สนใจ เจรจากับกลุ่มนี้” เพื่อต่อรองราคากับน้องมะระที่เป็นตัวแทนกลุ่มได้เลยค่ะ หรือพิมพ์ถามอะไรก็ได้\nถ้ามีกลุ่มใหม่ที่ตรงกับคำขอ น้องมะระจะแจ้งเตือนคุณที่นี่ค่ะ 🔔'),
+    {
+      ...text('กด “สนใจ เจรจากับกลุ่มนี้” เพื่อต่อรองราคากับน้องมะระที่เป็นตัวแทนกลุ่มได้เลยค่ะ หรือพิมพ์ถามอะไรก็ได้\nถ้ามีกลุ่มใหม่ที่ตรงกับคำขอ น้องมะระจะแจ้งเตือนคุณที่นี่ค่ะ 🔔'),
+      // ปุ่มลัดใต้ช่องพิมพ์ (กดได้แม้การ์ดเลื่อนขึ้นไปแล้ว หรือมือถือแสดงปุ่มในการ์ดไม่ครบ)
+      quickReply: { items: [{ type: 'action', action: { type: 'postback', label: `สนใจ เจรจา${CROP_SHORT_TH[req.crop]}`.slice(0, 20), data: postbackData('buyer_negotiate', undefined, req.crop), displayText: 'สนใจ เจรจากับกลุ่มนี้' } }] },
+    },
   ];
 }
 

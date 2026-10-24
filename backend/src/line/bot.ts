@@ -22,7 +22,7 @@ import {
 import type { LineMessage, LineSecrets } from './client.js';
 import { LineClient } from './client.js';
 import { randomInt, randomUUID } from 'node:crypto';
-import type { Crop } from '../core/types.js';
+import { ALL_CROPS, type Crop } from '../core/types.js';
 import { CROP_LABEL_TH, farmers, listings } from '../data/synthetic.js';
 import { groupListings } from '../core/grouping.js';
 import type { BuyerDraft, LineSession } from '../store/types.js';
@@ -63,13 +63,17 @@ import {
   text,
   MOCK_NOTE,
   type OfferExtras,
+  unitChoiceMessage,
+  cropGuessMessage,
+  withInterestButton,
 } from './flex.js';
 import { negotiationRounds } from './rounds.js';
 import { estimateTransport } from '../core/transportEstimate.js';
 import { MAX_HISTORY, smartChat, type ChatAction } from './chat.js';
 import { apply, decide, extractOffer, groupTerms, MAX_BUYER_ROUNDS, openingAsk, type BuyerNegDecision, type BuyerNegState } from './buyerNegotiation.js';
 import type { ListingDraft } from '../store/types.js';
-import { parseBuyerCrop, parseBuyerLocation, parseBuyerPrice, parseBuyerQuantity, parseListing } from './parse.js';
+import { cropsMentioned } from './cropMatch.js';
+import { bareNumber, parseBuyerCrop, parseBuyerLocation, parseBuyerPrice, parseBuyerQuantity, parseListing } from './parse.js';
 import { verifyLineSignature } from './signature.js';
 
 interface LineEvent {
@@ -111,6 +115,12 @@ function groupsFor(crop: Crop): GroupForBuyer[] {
   return groupListings(listings, farmers)
     .filter((g) => g.crop === crop)
     .map((g) => ({ crop: g.crop, cropLabel: CROP_LABEL_TH[g.crop], grade: g.grade, province: g.province, members: g.members.length, totalKg: g.members.reduce((n, m) => n + m.quantityKg, 0), window: g.deliveryWindow }));
+}
+
+/** พืชที่ผู้ซื้อกำลังคุยอยู่: กำลังเจรจา > กำลังกรอกคำขอ > คำขอล่าสุด */
+function focusCrop(session: LineSession, reqs: { crop: Crop }[]): Crop | undefined {
+  if (session.buyerNeg && session.buyerNeg.status !== 'ended') return session.buyerNeg.crop;
+  return session.buyerDraft?.crop ?? reqs[0]?.crop;
 }
 
 /** แจ้งเตือนผู้ซื้อได้กี่คนต่อกลุ่มใหม่ (push นับโควตาข้อความของ LINE OA) */
@@ -217,7 +227,7 @@ export class LineBot implements LineHooks {
     }
     // พิมพ์ผลผลิตครบในรูปแบบที่อ่านได้ → ไปขั้นยืนยันเลย (เร็ว ไม่ต้องเรียก AI)
     const r = parseListing(t);
-    if (r.ok) return this.acceptListing(userId, session, r.draft, r.gradeAssumed, reply);
+    if (r.ok) return this.acceptListing(userId, session, r.draft, r.gradeAssumed, reply, r.cropNote);
     // เกษตรกรพิมพ์คุย/ถามอิสระ → แชตกับ Nova ด้วยบริบทดีลของเขา
     if (session?.role === 'farmer') {
       const chat = await this.tryChat(userId, session, 'farmer', t);
@@ -244,7 +254,12 @@ export class LineBot implements LineHooks {
     try {
       if (!(await ctx.store.takeDailyQuota(`chat-${bangkokDate((ctx.now ?? (() => new Date()))())}`, ctx.chatDailyLimit ?? 300))) return undefined;
       const context = role === 'farmer' ? await this.farmerContext(session) : await this.buyerContext(userId, session);
-      const action = await smartChat(llm, { role, context, history: session.chat ?? [], message });
+      let action = await smartChat(llm, { role, context, history: session.chat ?? [], message });
+      // AI หลุดไปพูดถึงพืชอื่นที่ผู้ซื้อไม่ได้เลือก → ไม่ส่งข้อความนั้น
+      const focus = role === 'buyer' ? focusCrop(session, await ctx.store.listBuyerRequests(userId, 1)) : undefined;
+      if (focus && action.kind === 'reply' && cropsMentioned(action.text).some((c) => c !== focus)) {
+        action = { kind: 'reply', text: `ตอนนี้เรากำลังคุยเรื่อง${CROP_LABEL_TH[focus]}นะคะ ถ้าอยากเปลี่ยนพืช พิมพ์ “ซื้อ” แล้วเลือกใหม่ได้เลยค่ะ` };
+      }
       await this.save(userId, { chat: [...(session.chat ?? []), { r: 'u' as const, t: message.slice(0, 500) }, { r: 'a' as const, t: action.text.slice(0, 500) }].slice(-MAX_HISTORY) });
       return action;
     } catch (e) {
@@ -287,7 +302,9 @@ export class LineBot implements LineHooks {
   private async buyerContext(userId: string, session: LineSession) {
     const ctx = this.getCtx();
     const reqs = await ctx.store.listBuyerRequests(userId, 3);
-    const crops = [...new Set(reqs.length ? reqs.map((r) => r.crop) : session.buyerDraft?.crop ? [session.buyerDraft.crop] : (['rice_hommali', 'bitter_gourd', 'cassava'] as Crop[]))];
+    // พืชที่ผู้ซื้อกำลังสนใจตอนนี้ (กดเลือกล่าสุด) มาก่อนคำขอเก่า — กันน้องตอบเรื่องพืชอื่น
+    const focus = focusCrop(session, reqs);
+    const crops = focus ? [focus] : [...new Set(reqs.length ? reqs.map((r) => r.crop) : ALL_CROPS)];
     const date = bangkokDate((ctx.now ?? (() => new Date()))());
     const market: Record<string, unknown>[] = [];
     for (const crop of crops) {
@@ -302,6 +319,7 @@ export class LineBot implements LineHooks {
     const step = session.buyerDraft?.step;
     return {
       role: 'ผู้ซื้อ',
+      ...(focus ? { currentCrop: CROP_LABEL_TH[focus], rule: `ผู้ซื้อกำลังสนใจ${CROP_LABEL_TH[focus]} ตอบเรื่องพืชนี้เท่านั้น ห้ามพูดถึงพืชอื่น` } : {}),
       myRequests: reqs.map((r) => ({ crop: CROP_LABEL_TH[r.crop], quantityKg: r.quantityKg, location: r.location, offerPerKg: r.offerPerKg })),
       farmerGroups: crops.flatMap((c) => groupsFor(c)),
       market,
@@ -361,8 +379,8 @@ export class LineBot implements LineHooks {
       ...(median !== undefined ? { marketMedianPerKg: median } : {}),
     } as BuyerNegState;
     await appendAudit(ctx, st.id, { actor: 'system', type: 'bneg.started', data: { buyerUserId: userId, crop, groupId: st.groupId, openingAskPerKg: st.askPerKg } });
-    const withNeg: LineSession = { ...session, buyerNeg: st, buyerDraft: undefined };
-    await this.save(userId, { buyerNeg: st, buyerDraft: undefined });
+    const withNeg: LineSession = { ...session, buyerNeg: st, buyerDraft: undefined, chat: [] };
+    await this.save(userId, { buyerNeg: st, buyerDraft: undefined, chat: [] }); // เริ่มเจรจาใหม่ = ล้างประวัติแชตเก่า (กันพูดถึงพืชเดิม)
     // ผู้ซื้อมีคำขอซื้อพืชนี้อยู่แล้ว → ใช้ราคาที่เขาเสนอเป็นข้อเสนอแรก
     const req = (await ctx.store.listBuyerRequests(userId, 5)).find((r) => r.crop === crop);
     if (req) return reply([negotiationIntro(g), ...(await this.negRound(userId, withNeg, `ผู้ซื้อเสนอ ${req.offerPerKg} บาท/กก. ตามคำขอซื้อ`, req.offerPerKg))]);
@@ -395,7 +413,7 @@ export class LineBot implements LineHooks {
     const st = session.buyerNeg!;
     await appendAudit(this.getCtx(), st.id, { actor: 'buyer', actorId: userId, type: 'bneg.ended', data: { rounds: st.rounds, lastAskPerKg: st.askPerKg } });
     await this.save(userId, { buyerNeg: { ...st, status: 'ended' } });
-    return reply([text(`จบการเจรจาแล้วค่ะ ขอบคุณที่สนใจนะคะ ถ้าเปลี่ยนใจ กด “สนใจ เจรจากับกลุ่มนี้” หรือพิมพ์ “สนใจ” ได้เสมอค่ะ (ราคาล่าสุดที่หนูเสนอ ${st.askPerKg.toFixed(2)} บาท/กก.)`)]);
+    return reply([withInterestButton(`จบการเจรจาแล้วค่ะ ขอบคุณที่สนใจนะคะ ถ้าเปลี่ยนใจ กดปุ่ม “สนใจ เจรจา” ด้านล่าง หรือพิมพ์ “สนใจ” ได้เสมอค่ะ (ราคาล่าสุดที่หนูเสนอ ${st.askPerKg.toFixed(2)} บาท/กก.)`, st.crop)]);
   }
 
   /** 1 รอบการเจรจา: โค้ดตัดสินราคา → บันทึก ledger → Nova เขียนข้อความตามการตัดสิน (หรือใช้ข้อความสำเร็จรูป) */
@@ -460,7 +478,8 @@ export class LineBot implements LineHooks {
     // ข้อความของ AI ต้องตรงกับการตัดสินของโค้ด: พูดราคาที่ตัดสิน และไม่ฟังเหมือนรับราคาผู้ซื้อในรอบที่ยังไม่รับ ไม่งั้นใช้ข้อความสำเร็จรูป
     const shown = [price.toFixed(2), String(price)].some((p) => out!.includes(p));
     const contradicts = d.kind !== 'accept' && SOUNDS_ACCEPTING.test(out);
-    return shown && !contradicts ? out : template();
+    const otherCrop = cropsMentioned(out).some((c) => c !== st.crop); // พูดถึงพืชอื่นที่ไม่ได้เจรจาอยู่
+    return shown && !contradicts && !otherCrop ? out : template();
   }
 
   private async buyerChatReply(userId: string, chat: ChatAction, reply: (m: LineMessage[]) => Promise<void>, reAsk?: LineMessage) {
@@ -520,7 +539,7 @@ export class LineBot implements LineHooks {
     }
     if (INTEREST.test(t)) {
       const latest = (await this.getCtx().store.listBuyerRequests(userId, 1))[0];
-      return this.startBuyerNeg(userId, session, latest?.crop ?? session.buyerDraft?.crop ?? 'rice_hommali', reply);
+      return this.startBuyerNeg(userId, session, focusCrop(session, latest ? [latest] : []) ?? 'rice_hommali', reply);
     }
     const d = session.buyerDraft;
     if (!d) {
@@ -534,7 +553,7 @@ export class LineBot implements LineHooks {
     }
     // ตอบไม่ตรงคำถามของขั้นนี้ (เช่น ถามกลับ) → ให้น้องมะระตอบ แล้วถามคำถามเดิมซ้ำ
     const reAsk = d.step === 'crop' ? buyerCropMessage() : d.step === 'quantity' && d.crop ? buyerAskQuantity(d.crop) : d.step === 'location' ? buyerAskLocation() : d.step === 'price' ? buyerAskPrice(d.crop && CROP_LABEL_TH[d.crop]) : undefined;
-    const answers = d.step === 'crop' ? parseBuyerCrop(t).ok : d.step === 'quantity' ? parseBuyerQuantity(t).ok : d.step === 'location' ? parseBuyerLocation(t).ok && !/[?？]|ไหม|อะไร|ทำไม|เท่าไร|อย่างไร/.test(t) : d.step === 'price' ? parseBuyerPrice(t).ok : false;
+    const answers = d.step === 'crop' ? parseBuyerCrop(t).ok : d.step === 'quantity' ? parseBuyerQuantity(t).ok || bareNumber(t) !== undefined : d.step === 'location' ? parseBuyerLocation(t).ok && !/[?？]|ไหม|อะไร|ทำไม|เท่าไร|อย่างไร/.test(t) : d.step === 'price' ? parseBuyerPrice(t).ok : false;
     if (!answers && reAsk) {
       const chat = await this.tryChat(userId, session, 'buyer', t);
       if (chat) return this.buyerChatReply(userId, chat, reply, reAsk);
@@ -543,12 +562,22 @@ export class LineBot implements LineHooks {
       case 'crop': {
         const r = parseBuyerCrop(t);
         if (!r.ok) return reply([text(r.problem), buyerCropMessage()]);
+        if (r.note) return reply([cropGuessMessage(r.note, r.value)]); // พิมพ์ผิดแล้วเดาได้ → ให้กดยืนยันก่อน
+        // พิมพ์มาทั้งพืชและปริมาณในข้อความเดียว (เช่น "ข้าวโพด 20 ตัน") → ไม่ต้องถามปริมาณซ้ำ
+        const q = parseBuyerQuantity(t);
+        if (q.ok) {
+          await this.save(userId, { buyerDraft: { step: 'location', crop: r.value, quantityKg: q.value } });
+          return reply([text(`${CROP_LABEL_TH[r.value]} ${q.value.toLocaleString('en-US')} กก. รับทราบค่ะ`), buyerAskLocation()]);
+        }
         await this.save(userId, { buyerDraft: { step: 'quantity', crop: r.value } });
         return reply([buyerAskQuantity(r.value)]);
       }
       case 'quantity': {
         const r = parseBuyerQuantity(t);
-        if (!r.ok) return reply([text(r.problem)]);
+        if (!r.ok) {
+          const n = bareNumber(t);
+          return reply([n !== undefined ? unitChoiceMessage(r.problem, n) : text(r.problem)]);
+        }
         await this.save(userId, { buyerDraft: { ...d, step: 'location', quantityKg: r.value } });
         return reply([buyerAskLocation()]);
       }
@@ -594,12 +623,16 @@ export class LineBot implements LineHooks {
       return reply([autoGroupMessage()]);
     }
     if (pb.act === 'role_buyer' || pb.act === 'buyer_edit') {
-      await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'crop' } });
+      await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'crop' }, chat: [] });
       return reply([buyerCropMessage()]);
+    }
+    if (pb.act === 'buyer_crop_other') {
+      await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'crop' } });
+      return reply([text('พิมพ์ชื่อพืชที่สนใจมาได้เลยค่ะ เช่น “มันสำปะหลัง” พิมพ์ผิดนิดหน่อยหนูก็พอเดาได้นะคะ')]);
     }
     if (pb.act === 'buyer_crop') {
       if (!pb.crop) return;
-      await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'quantity', crop: pb.crop } });
+      await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'quantity', crop: pb.crop }, chat: [] });
       return reply([buyerAskQuantity(pb.crop)]);
     }
     if (pb.act === 'buyer_negotiate') {
@@ -611,7 +644,7 @@ export class LineBot implements LineHooks {
       const session = await store.getLineSession(userId);
       const neg = session?.buyerNeg;
       if (!session || !neg || neg.status === 'agreed' || neg.status === 'ended') {
-        return reply([text(neg?.status === 'agreed' ? `การเจรจานี้ตกลงไปแล้วที่ ${neg.agreedPerKg?.toFixed(2)} บาท/กก. ค่ะ` : 'ตอนนี้ไม่มีการเจรจาที่เปิดอยู่ค่ะ กด “สนใจ เจรจากับกลุ่มนี้” ในการ์ดกลุ่มเกษตรกรเพื่อเริ่มใหม่ได้เลย')]);
+        return reply([neg?.status === 'agreed' ? text(`การเจรจานี้ตกลงไปแล้วที่ ${neg.agreedPerKg?.toFixed(2)} บาท/กก. ค่ะ`) : withInterestButton('ตอนนี้ไม่มีการเจรจาที่เปิดอยู่ค่ะ กดปุ่ม “สนใจ เจรจา” ด้านล่างเพื่อเริ่มใหม่ได้เลย', neg?.crop ?? focusCrop(session ?? ({} as LineSession), []) ?? 'rice_hommali')]);
       }
       // ปุ่มที่ระบุราคาชัดเจน (ยอมรับราคาที่หนูเสนอ) = ผู้ซื้อยืนยันเองแล้ว ไม่ต้องถามซ้ำ
       if (pb.act === 'buyer_accept') return this.finalizeBuyerNeg(userId, session, neg.askPerKg, reply);

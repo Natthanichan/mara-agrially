@@ -10,7 +10,7 @@ import { KNOWLEDGE_FILES } from '../src/generated/knowledge.js';
 import { LineBot } from '../src/line/bot.js';
 import { LineApiError, LineClient, type LineMessage } from '../src/line/client.js';
 import { parsePostback, postbackData } from '../src/line/flex.js';
-import { parseListing } from '../src/line/parse.js';
+import { findQuantityKg, parseBuyerQuantity, parseListing } from '../src/line/parse.js';
 import { secretsLoader } from '../src/line/secrets.js';
 import { signLineBody, verifyLineSignature } from '../src/line/signature.js';
 import { summarize } from '../src/market/nabcClient.js';
@@ -45,6 +45,30 @@ describe('อ่านข้อความผลผลิตจาก LINE', ()
     expect(parseListing('ข้าว 12 ตัน ขั้นต่ำ 0 บาท').ok).toBe(false); // ราคา 0
     expect(parseListing('ข้าว 5 กก. ขั้นต่ำ 17 บาท').ok).toBe(false); // น้อยเกินไป
     expect(parseListing('ข้าว มะระ 12 ตัน ขั้นต่ำ 17 บาท').ok).toBe(false); // หลายพืช
+  });
+
+  it('ชื่อพืชพิมพ์ผิด/พิมพ์เบียด → เดาได้และแจ้งให้ตรวจ · พืชที่ไม่รองรับบอกตรง ๆ · ข้าวโพดไม่ถูกนับเป็นข้าว', () => {
+    expect(parseListing('ข้าวโพด 20 ตัน ขั้นต่ำ 8.5 บาท')).toMatchObject({ ok: true, draft: { crop: 'corn' } });
+    expect(parseListing('ยางพารา 3 ตัน ขั้นต่ำ 58 บาท')).toMatchObject({ ok: true, draft: { crop: 'rubber', quantityKg: 3000 } });
+    const typo = parseListing('ข้าวโพก 20 ตัน ขั้นต่ำ 8.5 บาท');
+    expect(typo).toMatchObject({ ok: true, draft: { crop: 'corn' } });
+    expect(typo.ok && typo.cropNote).toContain('ข้าวโพก');
+    expect(parseListing('มันสัปะหลัง 25 ตัน ขั้นต่ำ 3.7 บาท')).toMatchObject({ ok: true, draft: { crop: 'cassava' } });
+    const banana = parseListing('กล้สย 500 กิโล ขั้นต่ำ 10 บาท');
+    expect(banana.ok).toBe(false);
+    expect(!banana.ok && banana.problems.join(' ')).toContain('กล้วย');
+    expect(parseListing('ส่งที่บางพลี 500 กิโล ขั้นต่ำ 10 บาท').ok).toBe(false); // "บาง" ห้ามถูกเดาเป็น "ยาง"
+  });
+
+  it('ปริมาณ: หน่วยกิโล/ตัน เลขคำไทย และเลขเปล่าต้องถามหน่วย', () => {
+    expect(findQuantityKg('10 กิโลกรัม')).toBe(10);
+    expect(findQuantityKg('10กิโล')).toBe(10);
+    expect(findQuantityKg('แปดตัน')).toBe(8000);
+    expect(findQuantityKg('สองร้อยห้าสิบกิโล')).toBe(250);
+    expect(findQuantityKg('ยี่สิบเอ็ดตัน')).toBe(21_000);
+    expect(parseBuyerQuantity('10 กิโลกรัม')).toEqual({ ok: true, value: 10 });
+    expect(parseBuyerQuantity('10').ok).toBe(false); // เลขเปล่า → ถามหน่วย ไม่เดา
+    expect(parseListing('มะระ 20 กิโล ขั้นต่ำ 18 บาท')).toMatchObject({ ok: true, draft: { quantityKg: 20 } });
   });
 });
 
@@ -187,6 +211,11 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     const offer = pushes[0]!.messages[0]!;
     expect(buttons(offer).map((b) => b.label)).toEqual(['อนุมัติ', 'ไม่เอา', 'ต่อรองใหม่']);
     expect(asText(offer)).toContain('จำลอง');
+    // ก่อนกดอนุมัติ เห็นค่ารถโดยประมาณ: เส้นทาง ค่าเที่ยวรวม และยอดรวมของตัวเอง + ยอดก่อนหัก
+    expect(asText(offer)).toContain('ค่ารถโดยประมาณ');
+    expect(asText(offer)).toMatch(/จ\.ร้อยเอ็ด → จ\.\S+/);
+    expect(asText(offer)).toMatch(/รวม [\d,]+ บาท/);
+    expect(asText(offer)).toContain('ยอดก่อนหัก');
 
     const deal = (await store.getDeal('deal-1'))!;
     expect(deal).toMatchObject({ status: 'pending_approval', lineUserId: 'U-farmer', lineFarmerId: 'F01' });
@@ -363,6 +392,25 @@ describe('HTTP: /line/webhook', () => {
 });
 
 describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บอทถามทีละข้อ แล้วบันทึกคำขอซื้อ', () => {
+  it('พิมพ์ชื่อพืชผิด (ข้าวโพก) → ถามยืนยันด้วยปุ่ม · พิมพ์พืชพร้อมปริมาณ → ข้ามคำถามปริมาณ · อื่นๆ → ให้พิมพ์เอง', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_buyer'));
+    await h.tap(postbackData('buyer_crop_other'));
+    expect(asText(h.last().messages[0]!)).toContain('พิมพ์ชื่อพืช');
+    await h.say('ข้าวโพก');
+    const guess = asText(h.last().messages[0]!);
+    expect(guess).toContain('ข้าวโพดเลี้ยงสัตว์');
+    expect(guess).toContain('ใช่ไหม');
+    expect((await h.store.getLineSession('U-farmer'))?.buyerDraft?.step).toBe('crop'); // ยังไม่ข้ามขั้นจนกว่าจะกดยืนยัน
+    await h.tap(postbackData('buyer_crop', undefined, 'corn'));
+    expect(asText(h.last().messages[0]!)).toContain('ข้าวโพดเลี้ยงสัตว์เท่าไหร่');
+
+    const g = setup();
+    await g.tap(postbackData('role_buyer'));
+    await g.say('ยางพารา 3 ตัน');
+    expect((await g.store.getLineSession('U-farmer'))?.buyerDraft).toMatchObject({ step: 'location', crop: 'rubber', quantityKg: 3000 });
+  });
+
   const flow = async (h: ReturnType<typeof setup>, opts: { crop?: string } = {}) => {
     await h.tap(postbackData('role_buyer'));
     await h.tap(postbackData('buyer_crop', undefined, (opts.crop ?? 'rice_hommali') as never));
@@ -371,10 +419,10 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
     await h.say('18.5');
   };
 
-  it('กดปุ่มผู้ซื้อ → ถามพืช (ปุ่ม 3 ชนิด) → จำนวน → สถานที่ → ราคา → สรุปให้ยืนยัน → บันทึก', async () => {
+  it('กดปุ่มผู้ซื้อ → ถามพืช (ข้าว ยาง ข้าวโพด มะระ อื่นๆ) → จำนวน → สถานที่ → ราคา → สรุปให้ยืนยัน → บันทึก', async () => {
     const h = setup();
     await h.tap(postbackData('role_buyer'));
-    expect(buttons(h.last().messages[0]!)).toHaveLength(3);
+    expect(buttons(h.last().messages[0]!).map((b) => b.label)).toEqual(['ข้าว', 'ยาง', 'ข้าวโพด', 'มะระ', 'อื่นๆ (พิมพ์เอง)']);
     await h.tap(postbackData('buyer_crop', undefined, 'rice_hommali'));
     expect(asText(h.last().messages[0]!)).toContain('เท่าไหร่');
     await h.say('10 ตัน');
@@ -412,11 +460,11 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
     const h = setup();
     await h.tap(postbackData('role_buyer'));
     await h.say('ทุเรียน');
-    expect(asText(h.last().messages[0]!)).toContain('ยังไม่ทราบ');
+    expect(asText(h.last().messages[0]!)).toContain('ยังไม่มีกลุ่มเกษตรกรที่ขายทุเรียน'); // รู้จักแต่ยังไม่รองรับ → บอกตรง ๆ ไม่เดาเป็นพืชอื่น
     await h.say('มะระจีน');
     expect(asText(h.last().messages[0]!)).toContain('มะระจีน');
-    await h.say('5'); // ไม่มีหน่วยและน้อยเกินไป
-    expect(asText(h.last().messages[0]!)).toContain('ระบุหน่วย');
+    await h.say('5'); // ไม่มีหน่วย → ถามหน่วยด้วยปุ่ม
+    expect(asText(h.last().messages[0]!)).toContain('กดเลือก');
     await h.say('2 ตัน');
     await h.say('x');
     expect(asText(h.last().messages[0]!)).toContain('ขอสถานที่');
@@ -439,7 +487,7 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
 
     await flow(h, { crop: 'cassava' });
     await h.tap(postbackData('buyer_edit'));
-    expect(buttons(h.last().messages[0]!)).toHaveLength(3);
+    expect(buttons(h.last().messages[0]!).map((b) => b.label)).toEqual(['ข้าว', 'ยาง', 'ข้าวโพด', 'มะระ', 'อื่นๆ (พิมพ์เอง)']);
     await h.say('ยกเลิก');
     expect((await h.store.getLineSession('U-farmer'))?.buyerDraft).toBeUndefined();
     expect(h.store.buyerRequests).toHaveLength(1);
@@ -749,6 +797,19 @@ describe('แชตกับน้องมะระใน LINE (AI)', () => {
     expect((await g.store.getLineSession('U-farmer'))?.draft).toBeUndefined();
   });
 
+  it('ปริมาณต้องมาจากข้อความผู้ใช้: พิมพ์ 10 กิโลกรัม แต่ AI สรุป 100000 → ใช้ 10 กก. ตามที่พิมพ์', async () => {
+    const h = withChat([() => [tool('propose_buyer_request', { crop: 'bitter_gourd', quantity_kg: 100000, location: 'ตลาดไท จ.ปทุมธานี', offer_per_kg: 20, reply: 'สรุปให้แล้วค่ะ' })]]);
+    await h.store.putLineSession('U-farmer', { role: 'buyer' } as never); // ผู้ซื้อที่ไม่ได้กรอกคำขอค้างอยู่ → คุยกับ AI
+    await h.say('อยากได้มะระ 10 กิโลกรัม ส่งตลาดไท จ.ปทุมธานี ให้ 20 บาท อยากรู้ว่ามีไหม');
+    expect((await h.store.getLineSession('U-farmer'))?.buyerDraft).toMatchObject({ step: 'confirm', quantityKg: 10, offerPerKg: 20 });
+
+    // ไม่มีปริมาณในข้อความผู้ใช้เลย → AI ห้ามเดาปริมาณ
+    const g = withChat([() => [tool('propose_buyer_request', { crop: 'bitter_gourd', quantity_kg: 5000, location: 'ตลาดไท จ.ปทุมธานี', offer_per_kg: 20, reply: 'ok' })]]);
+    await g.store.putLineSession('U-farmer', { role: 'buyer' } as never);
+    await g.say('อยากได้มะระ ส่งตลาดไท จ.ปทุมธานี ให้ 20 บาท มีไหม');
+    expect((await g.store.getLineSession('U-farmer'))?.buyerDraft?.step).not.toBe('confirm');
+  });
+
   it('ผู้ซื้อถาม "ทำไมต้องจ่ายแพงกว่านี้" → AI ได้ราคาตลาด NABC และข้อมูลกลุ่มแบบรวม ไม่มีชื่อหรือราคาขั้นต่ำของเกษตรกร', async () => {
     const h = withChat([() => [{ text: 'ราคากลางตลาด NABC วันนี้ 17.65 บาท/กก. และกลุ่มส่งเป็นล็อตเดียว 41,500 กก. ค่ะ' }]]);
     await h.tap(postbackData('role_buyer'));
@@ -820,6 +881,30 @@ describe('ผู้ซื้อเจรจาราคากับน้อง�
     await h.say(offer);
     await h.tap(postbackData('buyer_confirm'));
   };
+
+  it('ทุกข้อความที่บอกให้กด "สนใจ" มีปุ่มให้กดจริง (หลังบันทึกคำขอ และหลังจบการเจรจา)', async () => {
+    const h = setup();
+    await register(h, '16');
+    expect(quick(h.last().messages.at(-1)!).map((a) => a.data)).toEqual([postbackData('buyer_negotiate', undefined, 'rice_hommali')]);
+    await h.tap(postbackData('buyer_negotiate', undefined, 'rice_hommali'));
+    await h.tap(postbackData('buyer_end'));
+    await h.tap(postbackData('buyer_end_confirm'));
+    expect(asText(h.last().messages[0]!)).toContain('จบการเจรจา');
+    expect(quick(h.last().messages[0]!).map((a) => a.data)).toEqual([postbackData('buyer_negotiate', undefined, 'rice_hommali')]);
+  });
+
+  it('กดสนใจข้าว แต่ AI ตอบเรื่องมะระ → ไม่ส่งข้อความนั้น ใช้ข้อความสำเร็จรูปของข้าวแทน · เริ่มเจรจาใหม่ล้างแชตเก่า', async () => {
+    const h = setup();
+    const seen: any[] = [];
+    h.ctx.chatLlm = () => ({ name: 'x', converse: async (req: any) => (seen.push(req), { content: [{ text: `มะระจีนของกลุ่มเราสดมากค่ะ ราคา ${(req.system.match(/"askPerKg":([\d.]+)/) ?? [])[1]} บาท/กก.` }] }) }) as never;
+    h.ctx.chatDailyLimit = 50;
+    await register(h, '16');
+    await h.store.putLineSession('U-farmer', { ...(await h.store.getLineSession('U-farmer'))!, chat: [{ r: 'u', t: 'มะระมีไหม' }, { r: 'a', t: 'มะระมีค่ะ' }] });
+    await h.tap(postbackData('buyer_negotiate', undefined, 'rice_hommali'));
+    const out = h.last().messages.map(asText).join(' ');
+    expect(out).not.toContain('มะระจีนของกลุ่มเรา');
+    expect(JSON.stringify(seen.at(-1)!.messages)).not.toContain('มะระมีไหม'); // ประวัติแชตเก่าถูกล้าง
+  });
 
   it('ราคาที่น้องมะระขอไม่เคยต่ำกว่าเป้าของกลุ่ม ยอมลดเป็นขั้น และตกลงเมื่อผู้ซื้อเสนอถึง', async () => {
     const { decide, apply, groupTerms, openingAsk } = await import('../src/line/buyerNegotiation.js');

@@ -92,7 +92,7 @@ describe('การจับกลุ่ม (ข้อมูลจำลอง)'
     const rice = groups.find((g) => g.crop === 'rice_hommali' && g.grade === 'A')!;
     expect(rice.members.map((m) => m.farmerId).sort()).toEqual(['F01', 'F02', 'F03', 'F04']);
     expect(groups.some((g) => g.members.some((m) => m.farmerId === 'F05'))).toBe(false); // เกรด B คนเดียว
-    expect(groups.map((g) => g.crop).sort()).toEqual(['bitter_gourd', 'cassava', 'rice_hommali']);
+    expect(groups.map((g) => g.crop).sort()).toEqual(['bitter_gourd', 'cassava', 'corn', 'rice_hommali', 'rubber']);
   });
 
   it('แยกกลุ่มเมื่อวันส่งมอบห่างเกินช่วงที่กำหนด', () => {

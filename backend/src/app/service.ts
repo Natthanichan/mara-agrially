@@ -1,12 +1,12 @@
 // ตรรกะของแอป (ไม่ผูกกับ AWS) — Lambda handler แค่แปลง HTTP ↔ ฟังก์ชันเหล่านี้
 // ทุก dependency ส่งเข้ามา (store, LLM, ผู้ซื้อ, ตลาด) จึงเทสได้ครบโดยไม่ต้องใช้ AWS
 
-import { MockBuyerApi } from '../buyer/mockBuyer.js';
+import { DEFAULT_BUYERS, MockBuyerApi } from '../buyer/mockBuyer.js';
 import { canFinalize, nextDealStatus } from '../core/stateMachine.js';
 import { checkPriceFloor, computeNetPerFarmer } from '../core/pricing.js';
 import { groupListings } from '../core/grouping.js';
 import { Ledger, type LedgerEvent } from '../core/ledger.js';
-import type { Crop, Group, Listing } from '../core/types.js';
+import { ALL_CROPS, type Crop, type Group, type Listing } from '../core/types.js';
 import { farmers, listings } from '../data/synthetic.js';
 import { runNegotiation, type AgentDeps } from '../agent/index.js';
 import type { LlmClient } from '../agent/llm/types.js';
@@ -45,14 +45,14 @@ export class AppError extends Error {
   }
 }
 
-const CROPS: Crop[] = ['rice_hommali', 'bitter_gourd', 'cassava'];
-const TITLES: Record<Crop, string> = { rice_hommali: 'ข้าวหอมมะลิ · ร้อยเอ็ด', bitter_gourd: 'มะระจีน · ราชบุรี', cassava: 'มันสำปะหลัง · นครราชสีมา' };
+const CROPS: Crop[] = ALL_CROPS;
+const TITLES: Record<Crop, string> = { rice_hommali: 'ข้าวหอมมะลิ · ร้อยเอ็ด', bitter_gourd: 'มะระจีน · ราชบุรี', cassava: 'มันสำปะหลัง · นครราชสีมา', rubber: 'ยางพารา · สุราษฎร์ธานี', corn: 'ข้าวโพดเลี้ยงสัตว์ · เพชรบูรณ์' };
 
 /** วันที่ตามเวลาไทย (YYYY-MM-DD) */
 export const bangkokDate = (d: Date) => new Date(d.getTime() + 7 * 3600_000).toISOString().slice(0, 10);
 
 /** เกษตรกรในข้อมูลจำลองที่ผู้ใช้ LINE สวมบทบาท (1 คนต่อพืช) */
-export const LINE_FARMER_SLOT: Record<Crop, string> = { rice_hommali: 'F01', bitter_gourd: 'F06', cassava: 'F09' };
+export const LINE_FARMER_SLOT: Record<Crop, string> = { rice_hommali: 'F01', bitter_gourd: 'F06', cassava: 'F09', rubber: 'F11', corn: 'F13' };
 
 /** รายการผลผลิตของดีลนี้: ข้อมูลจำลอง โดยแทนที่รายการของเกษตรกรใน LINE ด้วยที่เขาพิมพ์ */
 export const dealListings = (d: Pick<DealRecord, 'listingOverrides'>): Listing[] => {
@@ -312,6 +312,10 @@ export interface FarmerOffer {
   group: { memberCount: number; totalKg: number; netPerKgAvg: number; totalNetBaht: number };
   /** ราคาตลาดอ้างอิง (มัธยฐาน) ถ้ามี */
   marketMedianPerKg?: number;
+  /** ค่ารถโดยประมาณของเกษตรกรคนนี้ (เที่ยวรถรวมของเส้นทาง แบ่งตามน้ำหนักที่ส่ง) */
+  transport?: { fromProvince: string; toProvince?: string; tripCostBaht: number; tripKg: number; tripFarmers: number; myTotalBaht: number };
+  /** ยอดก่อนหักค่ารถและส่วนหัก (ราคา × ปริมาณ) */
+  myGrossBaht?: number;
 }
 
 /** ข้อมูลดีลที่ส่งให้เกษตรกรอ่านก่อนกดอนุมัติ */
@@ -329,6 +333,14 @@ export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: stri
   if (!mine || floor === undefined) throw new AppError(400, `เกษตรกร ${farmerId} ไม่ได้อยู่ในดีลนี้`);
   const totalKg = active.reduce((s, m) => s + m.quantityKg, 0);
   const totalNet = nets.reduce((s, n) => s + n.netTotal, 0);
+  const trip = st.terms.trips.find((t) => t.farmerIds.includes(farmerId));
+  const tripKg = trip ? active.filter((m) => trip.farmerIds.includes(m.farmerId)).reduce((s, m) => s + m.quantityKg, 0) : 0;
+  const fromProvince = farmers.find((f) => f.id === farmerId)?.province;
+  const buyerId = deal.outcome.buyerId;
+  const toProvince = DEFAULT_BUYERS.find((b) => b.id === buyerId)?.province;
+  const transport = trip && fromProvince
+    ? { fromProvince, ...(toProvince ? { toProvince } : {}), tripCostBaht: trip.totalCost, tripKg, tripFarmers: trip.farmerIds.length, myTotalBaht: Math.round(mine.transportPerKg * mine.quantityKg) }
+    : undefined;
   return {
     buyerName: deal.outcome.buyerName,
     pricePerKg: st.terms.pricePerKg,
@@ -336,6 +348,8 @@ export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: stri
     mine: { quantityKg: mine.quantityKg, netPerKg: mine.netPerKg, netTotal: mine.netTotal, transportPerKg: mine.transportPerKg, floorPerKg: floor, passesFloor: mine.netPerKg >= floor },
     group: { memberCount: active.length, totalKg, netPerKgAvg: totalKg > 0 ? Math.floor((totalNet / totalKg) * 100) / 100 : 0, totalNetBaht: Math.round(totalNet * 100) / 100 },
     ...(deal.metrics?.marketMedianPerKg !== undefined ? { marketMedianPerKg: deal.metrics.marketMedianPerKg } : {}),
+    ...(transport ? { transport } : {}),
+    myGrossBaht: Math.round(st.terms.pricePerKg * mine.quantityKg),
   };
 }
 

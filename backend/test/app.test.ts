@@ -50,6 +50,17 @@ describe('บริการดีล (ไม่ใช้ AWS)', () => {
     expect((await store.listEvents(id)).length).toBeGreaterThan(40);
   });
 
+  it('พืชใหม่ (ยางพารา ข้าวโพดเลี้ยงสัตว์) เจรจาจนรออนุมัติได้ และผ่านราคาขั้นต่ำของทุกคน', async () => {
+    for (const [crop, buyer] of [['rubber', 'B-E'], ['corn', 'B-F']] as const) {
+      const { ctx } = makeCtx();
+      const { id } = await startDeal(ctx, { crop });
+      const view = await getDeal(ctx, id);
+      expect(view.status).toBe('pending_approval');
+      expect(view.deal).toMatchObject({ buyerId: buyer });
+      expect(view.ledgerVerified).toBe(true);
+    }
+  });
+
   it('worker ถูกเรียกซ้ำ (Lambda retry) → ไม่เจรจาซ้ำ', async () => {
     const { ctx, store } = makeCtx();
     const { id } = await startDeal(ctx, { crop: 'cassava' });

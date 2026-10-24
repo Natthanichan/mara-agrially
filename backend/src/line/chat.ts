@@ -5,12 +5,12 @@
 //  - Nova "เสนอ" รายการผลผลิต/คำขอซื้อได้ผ่าน tool แต่โค้ดตรวจค่าทุกตัว และผู้ใช้ต้องกดยืนยันเองเสมอ
 //  - อนุมัติ/ไม่เอา/ต่อรองใหม่ ทำผ่านปุ่มเท่านั้น แชตทำแทนไม่ได้
 
-import type { Crop, Grade } from '../core/types.js';
+import { ALL_CROPS, type Crop, type Grade } from '../core/types.js';
 import { extractNumbers, numbersNeedingEvidence } from '../agent/guardrails.js';
 import type { LlmClient, Message, ToolSpec } from '../agent/llm/types.js';
 import { isText, isToolUse } from '../agent/llm/types.js';
 import type { BuyerDraft, ListingDraft } from '../store/types.js';
-import { FLOOR_LIMITS, QUANTITY_LIMITS } from './parse.js';
+import { findQuantityKg, FLOOR_LIMITS, normalize, QUANTITY_LIMITS } from './parse.js';
 
 export interface ChatTurn {
   r: 'u' | 'a';
@@ -22,7 +22,7 @@ export type ChatAction =
   | { kind: 'listing'; text: string; draft: ListingDraft; gradeAssumed: boolean }
   | { kind: 'buyer_request'; text: string; draft: Required<Omit<BuyerDraft, 'step'>> };
 
-const CROPS: Crop[] = ['rice_hommali', 'bitter_gourd', 'cassava'];
+const CROPS: Crop[] = ALL_CROPS;
 const GRADES: Grade[] = ['A', 'B', 'C'];
 export const MAX_HISTORY = 6;
 const TIMEOUT_MS = 9000;
@@ -101,6 +101,24 @@ function allowedNumbers(context: unknown, history: ChatTurn[], message: string):
 }
 
 const near = (a: number, b: number) => Math.abs(a - b) < 0.005;
+
+/** ตัวเลขที่ "ผู้ใช้" พิมพ์เอง (ไม่นับข้อความของน้องมะระ) */
+const userNumbers = (history: ChatTurn[], message: string) => allowedNumbers({}, history.filter((h) => h.r === 'u'), message);
+
+/**
+ * ปริมาณต้องมาจากข้อความผู้ใช้เท่านั้น: ถ้าผู้ใช้พิมพ์ปริมาณพร้อมหน่วย ใช้ค่าที่โค้ดอ่านได้ (ไม่เชื่อตัวเลขของ AI)
+ * ถ้าไม่มีหน่วย ยอมรับค่าที่ AI เสนอเฉพาะเมื่อตรงกับเลขที่ผู้ใช้พิมพ์ (หรือ ×1000 เมื่อผู้ใช้พูดว่า "ตัน")
+ */
+export function quantityFromUser(history: ChatTurn[], message: string, proposedKg: number): number | undefined {
+  const userTexts = [message, ...history.filter((h) => h.r === 'u').map((h) => h.t).reverse()].map(normalize);
+  for (const t of userTexts) {
+    const kg = findQuantityKg(t);
+    if (kg !== undefined) return kg;
+  }
+  const saidTon = userTexts.some((t) => /ตัน/.test(t));
+  const nums = userTexts.flatMap((t) => extractNumbers(t));
+  return nums.some((n) => near(n, proposedKg) || (saidTon && near(n * 1000, proposedKg))) ? proposedKg : undefined;
+}
 export const inventedNumbers = (text: string, allowed: number[]) => numbersNeedingEvidence(text).filter((n) => !allowed.some((a) => near(a, n)));
 
 /** ประวัติ → ข้อความสลับ user/assistant ตามที่ Converse API ต้องการ (เริ่มด้วย user) */
@@ -171,17 +189,19 @@ export async function smartChat(
     const said = voice(typeof input.reply === 'string' && input.reply.trim() ? input.reply.trim() : text);
 
     if (use?.toolUse.name === 'propose_listing' && opts.role === 'farmer') {
-      const v = validListing(input);
-      // ตัวเลขในรายการต้องมาจากข้อความของผู้ใช้ (กัน AI เดาราคาขั้นต่ำแทนเกษตรกร)
-      const fromUser = allowedNumbers({}, opts.history, opts.message);
+      // ตัวเลขในรายการต้องมาจากข้อความของผู้ใช้ (กัน AI เดาราคาขั้นต่ำหรือปริมาณแทนเกษตรกร)
+      const qty = quantityFromUser(opts.history, opts.message, Number(input.quantity_kg));
+      const v = qty === undefined ? undefined : validListing({ ...input, quantity_kg: qty });
+      const fromUser = userNumbers(opts.history, opts.message);
       if (v && fromUser.some((n) => near(n, v.draft.floorPricePerKg))) {
         return { kind: 'listing', text: inventedNumbers(said, allowed).length ? 'หนูสรุปรายการให้แล้วค่ะ ตรวจแล้วกดยืนยันได้เลย' : said, ...v };
       }
       return { kind: 'reply', text: 'ขอข้อมูลให้ครบนะคะ: พืช ปริมาณ และราคาสุทธิขั้นต่ำที่คุณยอมรับได้ เช่น “ข้าวหอมมะลิ 12 ตัน ขั้นต่ำ 17 บาท/กก.”' };
     }
     if (use?.toolUse.name === 'propose_buyer_request' && opts.role === 'buyer') {
-      const v = validBuyerRequest(input);
-      const fromUser = allowedNumbers({}, opts.history, opts.message);
+      const qty = quantityFromUser(opts.history, opts.message, Number(input.quantity_kg));
+      const v = qty === undefined ? undefined : validBuyerRequest({ ...input, quantity_kg: qty });
+      const fromUser = userNumbers(opts.history, opts.message);
       if (v && fromUser.some((n) => near(n, v.offerPerKg))) {
         return { kind: 'buyer_request', text: inventedNumbers(said, allowed).length ? 'สรุปคำขอซื้อให้แล้วค่ะ ตรวจแล้วกดยืนยันได้เลย' : said, draft: v };
       }
