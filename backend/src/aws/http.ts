@@ -34,9 +34,15 @@ export async function handleHttp(ctx: AppContext, e: APIGatewayProxyEventV2): Pr
     const m = /^\/api\/deals\/([A-Za-z0-9-]{1,64})(\/approvals)?$/.exec(path);
     if (m && method === 'GET' && !m[2]) return json(200, await getDeal(ctx, m[1]!));
     if (m && method === 'POST' && m[2]) return json(200, await recordApproval(ctx, m[1]!, parseBody(e)));
-    if (method === 'POST' && path === '/line/webhook') {
-      // ยังไม่เปิดใช้ LINE ในรอบนี้ — ตอบ 200 เพื่อให้ปุ่ม Verify ใน LINE Console ผ่าน
-      return json(200, { ok: true, note: 'LINE integration coming next' });
+    if (method === 'POST' && (path === '/line/webhook' || path === '/api/line/webhook')) {
+      if (!ctx.line) return json(503, { error: 'ยังไม่ได้ตั้งค่า LINE' });
+      // ต้องใช้ body ดิบตามที่ LINE ส่งมาเพื่อตรวจลายเซ็น (ห้าม parse แล้วแปลงกลับ)
+      const raw = e.body ? (e.isBase64Encoded ? Buffer.from(e.body, 'base64').toString('utf8') : e.body) : '';
+      if (raw.length > 100_000) return json(413, { error: 'ข้อมูลใหญ่เกินไป' });
+      const sig = e.headers?.['x-line-signature'] ?? e.headers?.['X-Line-Signature'];
+      const host = e.requestContext.domainName;
+      const r = await ctx.line.handleWebhook(raw, sig, process.env.APP_URL || (host ? `https://${host}/` : undefined));
+      return json(r.status, r.status === 200 ? { ok: true } : { error: r.error ?? 'ผิดพลาด' });
     }
     return json(404, { error: 'ไม่พบหน้า/คำสั่งนี้' });
   } catch (err) {

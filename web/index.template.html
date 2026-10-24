@@ -83,6 +83,16 @@ header.top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-cont
 .card .pre { white-space: pre-line; }
 .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
 .big { font-family: var(--mono); font-size: 22px; font-weight: 500; }
+.evid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.evid span { font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; background: var(--sunk); }
+.evid span.sim { border-style: dashed; color: var(--muted); }
+.evid span b { font-family: var(--mono); font-weight: 500; color: var(--muted); margin-right: 4px; }
+.why { font-size: 13px; color: var(--muted); margin-top: 6px; }
+.objection { margin-top: 8px; padding: 6px 10px; border-left: 3px solid var(--warn); background: var(--warn-soft); border-radius: 0 6px 6px 0; font-size: 13px; }
+.ack { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .legend { display: flex; gap: 12px; font-size: 12px; color: var(--muted); margin-top: 6px; flex-wrap: wrap; }
+.chart .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
 .msg { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--sunk); font-size: 14px; }
 .who { font-weight: 600; }
 .muted { color: var(--muted); }
@@ -98,6 +108,31 @@ header.top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-cont
 .quotes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .quotes span { font-size: 13px; padding: 2px 8px; border-radius: 6px; background: var(--sunk); }
 .step.hidden-step { display: none; }
+/* มุมมองแชต: น้องมะระ (ขวา) ↔ ผู้ซื้อ (ซ้าย) · ขั้นตอนของระบบเป็นบรรทัดเล็กตรงกลาง */
+.timeline { gap: 8px; }
+.step.cmsg, .step.cnote { display: flex; gap: 8px; }
+.step.cmsg { align-items: flex-end; }
+.step.cmsg.me { flex-direction: row-reverse; }
+.avatar { width: 32px; height: 32px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: 13px; font-weight: 700; background: var(--buyer-soft); color: var(--buyer); }
+.step.cmsg.me .avatar { background: var(--accent-soft); color: var(--accent); }
+.bubble { max-width: min(560px, 84%); background: var(--surface); border: 1px solid var(--line); border-radius: 18px 18px 18px 6px; padding: 9px 13px; }
+.step.cmsg.me .bubble { background: var(--accent-soft); border-color: transparent; border-radius: 18px 18px 6px 18px; }
+.bubble .who { font-size: 12px; color: var(--muted); margin-bottom: 3px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.bubble .who b { color: var(--ink); font-weight: 600; }
+.bubble .text { font-size: 15px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble .meta { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); }
+.bubble .tag { font-family: var(--mono); font-size: 12px; padding: 1px 7px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--ink); }
+.step.cmsg.me .bubble .tag { border-color: transparent; }
+.bubble details { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.bubble summary { cursor: pointer; font-size: 12px; }
+.bubble details ul { margin: 6px 0 0; padding-left: 18px; }
+.step.cnote { justify-content: center; }
+.step.cnote .cn { font-size: 12.5px; color: var(--muted); background: var(--sunk); border-radius: 999px; padding: 4px 12px; max-width: 92%; text-align: center; line-height: 1.5; }
+.step.cnote.bad .cn { background: var(--danger-soft); color: var(--danger); border-radius: 12px; }
+.step.cnote.ok .cn { background: var(--accent-soft); color: var(--accent); font-weight: 600; border-radius: 12px; }
+.step.cnote.warn .cn { background: var(--warn-soft); color: var(--warn); font-weight: 600; border-radius: 12px; }
+.step.cnote details { display: inline; } .step.cnote summary { display: inline; cursor: pointer; text-decoration: underline dotted; }
+.step.cnote .chits { text-align: left; margin-top: 6px; }
 @media (prefers-reduced-motion: no-preference) { .step.reveal { animation: rise .35s ease-out; } @keyframes rise { from { opacity: .2; transform: translateY(6px); } to { opacity: 1; transform: none; } } }
 @media (max-width: 560px) { .step { grid-template-columns: minmax(0, 1fr); gap: 4px; } .step .when { flex-direction: row; padding-top: 0; } }
 
@@ -187,7 +222,9 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
   const kg = (n) => Number(n).toLocaleString('th-TH');
   const time = (iso) => new Date(iso).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Bangkok' });
   const DECISION = { offer: ['เสนอราคา', 'info'], counter: ['โต้กลับ', 'info'], final_offer: ['ข้อเสนอสุดท้าย', 'mid'], accept: ['ตกลง', 'ok'], walk_away: ['ถอนตัว', 'bad'] };
-  const BLOCK = { below_floor: 'ต่ำกว่าราคาขั้นต่ำของสมาชิก', private_data_leak: 'จะเปิดเผยราคาขั้นต่ำให้ผู้ซื้อ', below_buyer_offer: 'เสนอต่ำกว่าที่ผู้ซื้อให้อยู่แล้ว', round_limit: 'เกินจำนวนรอบที่กำหนด', invalid_input: 'ข้อมูลไม่ถูกต้อง' };
+  const BLOCK = { below_floor: 'ต่ำกว่าราคาขั้นต่ำของสมาชิก', private_data_leak: 'ตัวเลขตรงกับราคาขั้นต่ำของสมาชิก', below_buyer_offer: 'เสนอต่ำกว่าที่ผู้ซื้อให้อยู่แล้ว', round_limit: 'เกินจำนวนรอบที่กำหนด', invalid_input: 'ข้อมูลไม่ถูกต้อง', unverified_number: 'ตัวเลขที่ไม่มีหลักฐาน' };
+  const STRATEGY = { anchor: 'ตั้งราคาเปิดพร้อมเหตุผล', evidence_value: 'ชี้คุณค่าด้วยหลักฐาน', address_objection: 'ตอบข้อกังวลของผู้ซื้อ', conditional_concession: 'ยอมลดแบบมีเงื่อนไข', trade_off: 'แลกเงื่อนไข', contest_deduction: 'ต่อรองส่วนหัก', competitive_leverage: 'อ้างข้อเสนอจริงของรายอื่น', final_push: 'ขอปิดดีล' };
+  const TAG = { market_reference: 'ราคาตลาด', volume: 'ปริมาณรวม', quality_grade: 'คุณภาพ/เกรด', delivery_ready: 'การส่งมอบ', consolidated_logistics: 'รวมขนส่ง', competing_offer: 'ข้อเสนอรายอื่น', buyer_history: 'ประวัติราคา' };
 
   let current = null;
   let timer = null;
@@ -200,55 +237,50 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
   }
 
   function stepHTML(s, sc, names) {
-    const t = `<span class="label num">${time(s.at)}</span>`;
-    const wrap = (chip, cls, body) => `<li class="step"><div class="when">${t}${chip}</div><div class="card ${cls}">${body}</div></li>`;
+    const at = `<span class="time">${time(s.at)}</span>`;
+    const note = (body, cls = '') => `<li class="step cnote ${cls}"><div class="cn">${body}</div></li>`;
+    const initial = (name) => esc(String(name ?? '?').replace(/^(โรงสี|ผู้ส่งออก|ตลาดค้าส่ง)(จำลอง)?\s*/, '').slice(0, 2) || '?');
+    const ded = (list) => (list ?? []).map((d) => typeof d === 'string' ? d : d.kind === 'percent' ? `${d.label} ${d.percent}%` : d.kind === 'per_kg' ? `${d.label} ${d.amountPerKg} บาท/กก.` : `${d.label} ${d.amount} บาท`);
     switch (s.kind) {
-      case 'plan':
-        return wrap('<span class="chip agent">วางแผน</span>', 'agent', `<p class="pre">${esc(s.text)}</p>`);
-      case 'reasoning':
-        return wrap('<span class="chip agent">ประเมินใหม่</span>', 'agent', `<p class="pre">${esc(s.text)}</p>`);
       case 'market':
-        if (!s.available) return wrap('<span class="chip">ราคาตลาด</span>', 'quiet', `<p class="muted">${esc(s.note)}</p>`);
-        return wrap('<span class="chip">ราคาตลาดจริง</span>', '', `
-          <div class="row"><span class="big">${baht(s.medianPerKg)}</span><span>บาท/กก. ค่ากลาง</span><span class="muted small">ช่วง ${baht(s.minPerKg)}–${baht(s.maxPerKg)} จาก ${s.sampleCount} แหล่ง</span></div>
-          ${s.sameProvince?.length ? `<div class="quotes">${s.sameProvince.map((q) => `<span>${esc(q.market)} <b class="num">${baht(q.pricePerKg)}</b></span>`).join('')}</div>` : ''}
-          <p class="muted small" style="margin-top:6px">${esc(s.source)} · ${esc(s.date)}${s.stale ? ' · ข้อมูลของวันก่อนหน้า' : ''}</p>`);
+        return s.available
+          ? note(`น้องมะระดูราคาตลาด NABC (${esc(s.date)}${s.stale ? ' · ข้อมูลล่าสุดที่มี' : ''}): ราคากลาง <b class="num">${baht(s.medianPerKg)}</b> บาท/กก. ช่วง ${baht(s.minPerKg)}–${baht(s.maxPerKg)}`)
+          : note(esc(s.note));
       case 'rag':
-        return wrap('<span class="chip">ค้นความรู้ (RAG)</span>', '', `
-          <p class="small"><span class="muted">ค้นหา:</span> ${esc(s.query)}</p>
-          <ul class="hits">${s.hits.map((h) => `<li><div class="src">${esc(h.source)}</div><div class="txt">${esc(h.text)}</div><button type="button" data-more>อ่านต่อ</button></li>`).join('')}</ul>`);
+        return note(`<details><summary>ค้นข้อมูลอ้างอิง: ${esc(s.query)}</summary><ul class="chits">${s.hits.map((h) => `<li><b>${esc(h.source)}</b> — ${esc(h.text).slice(0, 220)}…</li>`).join('')}</ul></details>`);
       case 'buyers':
-        return wrap('<span class="chip">หาผู้ซื้อ</span>', 'quiet', `<p class="small">ผู้ซื้อที่รับพืช เกรด และปริมาณนี้: ${s.buyers.map((b) => `<b>${esc(b.name)}</b> <span class="muted">(รับ ${kg(b.minKg)}+ กก. · จ่ายใน ${b.paymentTermDays} วัน)</span>`).join(' · ') || 'ไม่มี'}</p>`);
+        return note(`หาผู้ซื้อที่รับปริมาณนี้ได้ ${s.buyers.length} ราย: ${s.buyers.map((b) => esc(b.name)).join(', ') || '–'}`);
+      case 'history':
+        return note(`ประวัติที่เคยคุยกับ ${esc(names[s.buyerId] ?? s.buyerId)}: ${s.records.slice(0, 2).map((r) => `เปิด ${baht(r.openingPerKg)} → จบ ${baht(r.finalPerKg)}`).join(' · ')}`);
       case 'buyer': {
-        const [lbl, cls] = DECISION[s.decision] ?? [s.decision, 'info'];
-        const ded = (s.deductions ?? []).map((d) => d.kind === 'percent' ? `${d.label} ${d.percent}%` : d.kind === 'per_kg' ? `${d.label} ${d.amountPerKg} บาท/กก.` : `${d.label} ${d.amount} บาท`);
-        return wrap('<span class="chip buyer">ผู้ซื้อตอบ</span>', 'buyer', `
-          <div class="row"><span class="who">${esc(s.buyer)}</span><span class="pill ${cls}">${lbl}</span><span class="big">${baht(s.price)}</span><span class="small">บาท/กก.</span>${ded.length ? `<span class="pill mid">${esc(ded.join(', '))}</span>` : ''}</div>
-          <div class="msg">${esc(s.message)}</div>`);
+        const [lbl] = DECISION[s.decision] ?? [s.decision];
+        const d = ded(s.deductions);
+        const msg = s.objection && !String(s.message).includes(s.objection.text) ? `${s.message} ${s.objection.text}` : s.message;
+        return `<li class="step cmsg"><div class="avatar" aria-hidden="true">${initial(s.buyer)}</div><div class="bubble">
+          <div class="who"><b>${esc(s.buyer)}</b>${at}</div>
+          <div class="text">${esc(msg)}</div>
+          <div class="meta"><span class="tag">${baht(s.price)} บาท/กก.</span><span>${esc(lbl)}</span>${d.length ? `<span>· ${esc(d.join(', '))}</span>` : ''}${s.acknowledged?.length ? `<span>· เห็นด้วยเรื่อง${esc(s.acknowledged.map((t) => TAG[t] ?? t).join(', '))}</span>` : ''}</div>
+        </div></li>`;
       }
       case 'counter':
-        return wrap('<span class="chip agent">น้องมะระเสนอ</span>', 'agent', `
-          <div class="row"><span class="small muted">ถึง</span><span class="who">${esc(names[s.buyerId] ?? s.buyerId)}</span><span class="big">${baht(s.price)}</span><span class="small">บาท/กก.</span>${s.contest?.length ? `<span class="pill mid">ขอลด${esc(s.contest.join(', '))}</span>` : ''}</div>
-          <div class="msg">${esc(s.message)}</div>`);
+        return `<li class="step cmsg me"><div class="avatar" aria-hidden="true">มะ</div><div class="bubble">
+          <div class="who"><b>น้องมะระ</b> ถึง ${esc(names[s.buyerId] ?? s.buyerId)} ${at}</div>
+          <div class="text">${esc(s.message)}</div>
+          <div class="meta"><span class="tag">ขอ ${baht(s.price)} บาท/กก.</span>${s.contest?.length ? `<span>· ขอลด${esc(s.contest.join(', '))}</span>` : ''}</div>
+          ${s.strategy ? `<details><summary>ทำไมพูดแบบนี้</summary><p style="margin-top:4px">${esc(STRATEGY[s.strategy] ?? s.strategy)}${s.rationale ? ` — ${esc(s.rationale)}` : ''}</p>${s.evidence?.length ? `<ul>${s.evidence.map((e) => `<li>${e.verified ? '' : '(ข้อมูลจำลอง) '}${esc(e.label)}</li>`).join('')}</ul>` : ''}</details>` : ''}
+        </div></li>`;
       case 'evaluation':
-        return `<li class="step"><div class="when">${t}<span class="chip">โค้ดคำนวณ</span></div><div class="card quiet small"><div class="row">
-          <span>ราคาสุทธิ <b>${esc(s.buyer ?? s.buyerId)}</b> ที่ ${baht(s.price)}${s.deductions?.length ? ` (${esc(s.deductions.join(', '))})` : ''}</span>
-          <span>เฉลี่ย <b class="num">${baht(s.netAvg)}</b> บาท/กก.</span>
-          ${s.passes ? '<span class="pill ok">ผ่านขั้นต่ำทุกคน</span>' : `<span class="pill bad">ต่ำกว่าขั้นต่ำ ${s.below} คน</span>`}
-        </div></div></li>`;
+        return note(`คิดราคาสุทธิให้แล้ว: ${esc(s.buyer ?? s.buyerId)} ${baht(s.price)} → เกษตรกรได้เฉลี่ย <b class="num">${baht(s.netAvg)}</b> บาท/กก. · ${s.passes ? 'ผ่านขั้นต่ำทุกคน' : `ยังต่ำกว่าขั้นต่ำ ${s.below} คน`}`);
       case 'blocked':
-        return wrap('<span class="chip danger">ระบบป้องกัน</span>', 'danger', `
-          <div class="row"><b>บล็อก: ${esc(BLOCK[s.code] ?? s.code)}</b>${s.attemptedPrice ? `<span class="small">ราคาที่พยายามเสนอ <span class="num">${baht(s.attemptedPrice)}</span></span>` : ''}</div>
-          <p class="small" style="margin-top:4px">${esc(s.reason)}</p>
-          <p class="small muted" style="margin-top:4px">ไม่มีอะไรถูกส่งถึงผู้ซื้อ · บันทึกลง ledger แล้ว</p>`);
+        return note(`<details><summary>ระบบป้องกันไม่ส่งข้อความนี้ถึงผู้ซื้อ: ${esc(BLOCK[s.code] ?? s.code)}</summary> — ${esc(s.reason)}</details>`, 'bad');
       case 'tool_error':
-        return wrap('<span class="chip">ข้อผิดพลาด</span>', 'quiet', `<p class="small muted">${esc(s.tool)}: ${esc(s.error)}</p>`);
+        return note(esc(s.error));
       case 'llm_error':
-        return wrap('<span class="chip danger">AI ขัดข้อง</span>', 'danger', `<p class="small">${esc(s.error)}</p>`);
+        return note(`AI ขัดข้อง: ${esc(s.error)}`, 'bad');
       case 'outcome':
         return s.outcomeKind === 'prepared'
-          ? wrap('<span class="chip agent">ผลลัพธ์</span>', 'agent', `<p><b>เตรียมดีลกับ ${esc(s.buyerName)} ให้เกษตรกรอนุมัติ</b></p><p class="small muted">Agent ปิดดีลเองไม่ได้ ต้องรอเกษตรกรกดอนุมัติ</p>`)
-          : wrap('<span class="chip warn">ผลลัพธ์</span>', 'warn', `<p><b>${s.outcomeKind === 'escalated' ? 'ส่งเรื่องให้กลุ่มตัดสินใจ' : 'หยุดอย่างปลอดภัย'}</b></p><p class="small">${esc(s.reason)}</p>`);
+          ? note(`น้องมะระเลือก ${esc(s.buyerName)} แล้วส่งให้เกษตรกรตัดสินใจ — ยังไม่ปิดดีลจนกว่าทุกคนกดอนุมัติ`, 'ok')
+          : note(`${s.outcomeKind === 'escalated' ? 'ส่งเรื่องให้กลุ่มตัดสินใจ' : 'หยุดอย่างปลอดภัย'}: ${esc(s.reason)}`, 'warn');
       default:
         return '';
     }
@@ -278,13 +310,41 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
     </table></div><p class="small muted" style="margin-top:8px">ราคาสุทธิ = ราคาหลังหักค่าขนส่งและส่วนหักทั้งหมด เฉลี่ยทั้งกลุ่ม (บาท/กก.)</p></section>`;
   }
 
+  /** กราฟราคาแต่ละรอบ: ผู้ซื้อเสนอ (เส้นทึบ) กับน้องมะระขอ (เส้นประ) — ไม่แสดงราคาขั้นต่ำ */
+  function priceChart(sc, names) {
+    const COLORS = ['#3a4c9c', '#1d6a43', '#8f5400', '#b0261b'];
+    const series = {};
+    for (const s of sc.steps) {
+      if (s.kind === 'buyer') (series[s.buyerId] ??= { offers: [], asks: [] }).offers.push(s.price);
+      if (s.kind === 'counter') (series[s.buyerId] ??= { offers: [], asks: [] }).asks.push(s.price);
+    }
+    const ids = Object.keys(series).filter((id) => series[id].asks.length);
+    if (!ids.length) return '';
+    const all = ids.flatMap((id) => [...series[id].offers, ...series[id].asks]);
+    const lo = Math.min(...all), hi = Math.max(...all), span = Math.max(hi - lo, 0.01);
+    const n = Math.max(...ids.map((id) => Math.max(series[id].offers.length, series[id].asks.length + 1)));
+    const W = 320, H = 170, P = 30;
+    const x = (i) => P + (i * (W - P - 10)) / Math.max(n - 1, 1);
+    const y = (v) => H - 20 - ((v - lo) / span) * (H - 40);
+    const line = (pts, color, dash) => `<polyline fill="none" stroke="${color}" stroke-width="2" ${dash ? 'stroke-dasharray="4 3"' : ''} points="${pts.map(([i, v]) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')}"/>` + pts.map(([i, v]) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.5" fill="${color}"/>`).join('');
+    const body = ids.map((id, k) => {
+      const c = COLORS[k % COLORS.length];
+      return line(series[id].offers.map((v, i) => [i, v]), c, false) + line(series[id].asks.map((v, i) => [i + 1, v]), c, true);
+    }).join('');
+    const axis = `<text x="4" y="${y(hi) + 4}" font-size="10" fill="currentColor">${baht(hi)}</text><text x="4" y="${y(lo) + 4}" font-size="10" fill="currentColor">${baht(lo)}</text><line x1="${P}" x2="${W - 10}" y1="${H - 20}" y2="${H - 20}" stroke="currentColor" stroke-opacity=".2"/>`;
+    return `<section class="panel chart"><h2>ราคาแต่ละรอบ</h2><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="กราฟราคาที่ผู้ซื้อเสนอและที่น้องมะระขอในแต่ละรอบ" style="color:var(--muted)">${axis}${body}</svg>
+      <div class="legend">${ids.map((id, k) => `<span><i style="background:${COLORS[k % COLORS.length]}"></i>${esc(names[id] ?? id)}</span>`).join('')}<span>เส้นทึบ = ผู้ซื้อเสนอ · เส้นประ = น้องมะระขอ</span></div></section>`;
+  }
+
   function metricsHTML(sc) {
     const m = sc.metrics;
     if (!m) return '';
     const rounds = Object.values(m.roundsByBuyer).reduce((a, b) => a + b, 0);
     const uplift = m.upliftVsBestOpeningPerKg;
     return `<section class="panel"><h2>ตัวชี้วัด</h2><div class="metrics">
-      ${uplift != null ? `<div class="metric hl"><span class="label">สุทธิเพิ่มจากข้อเสนอแรก</span><b>+${baht(uplift)}</b><span class="small">บาท/กก. · ≈${baht(m.upliftVsBestOpeningBaht, 0)} บาท ทั้งกลุ่ม</span></div>` : ''}
+      ${m.upliftVsChosenOpeningPerKg != null ? `<div class="metric hl"><span class="label">สุทธิเพิ่มจากข้อเสนอแรกของผู้ซื้อรายนี้</span><b>+${baht(m.upliftVsChosenOpeningPerKg)}</b><span class="small">บาท/กก. · ≈${baht(m.upliftVsChosenOpeningBaht, 0)} บาท ทั้งกลุ่ม</span></div>` : ''}
+      ${uplift != null ? `<div class="metric"><span class="label">เทียบข้อเสนอแรกที่ดีที่สุด</span><b>+${baht(uplift)}</b><span class="small">บาท/กก.</span></div>` : ''}
+      ${m.strategies && Object.keys(m.strategies).length ? `<div class="metric wide"><span class="label">กลยุทธ์ที่ใช้</span><span class="small">${Object.entries(m.strategies).map(([k, v]) => `${esc(STRATEGY[k] ?? k)} ×${v}`).join(' · ')}${m.repeatedMoves ? ` · ใช้เหตุผลซ้ำ ${m.repeatedMoves} ครั้ง` : ''}</span></div>` : ''}
       <div class="metric"><span class="label">ผู้ซื้อที่เจรจา</span><b>${m.buyersContacted}</b><span class="small">ราย · ${rounds} รอบ</span></div>
       <div class="metric ${m.guardrailBlocks ? 'bad' : ''}"><span class="label">ระบบป้องกันบล็อก</span><b>${m.guardrailBlocks}</b><span class="small">ครั้ง</span></div>
       <div class="metric"><span class="label">ขั้นการทำงานของ AI</span><b>${m.steps}</b><span class="small">ขั้น · ${m.toolCalls} tool calls</span></div>
@@ -317,7 +377,7 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
       <p class="small muted">${sc.deal.deductions.length ? esc(sc.deal.deductions.join(', ')) + ' · ' : ''}สุทธิเฉลี่ย <b class="num">${baht(sc.deal.netAvg)}</b> บาท/กก.</p>
       <ul class="farmers">${sc.farmers.map((f) => `<li class="${a[f.id] === 'no' ? 'out' : ''}">
           <div class="fname"><b>${esc(f.name)}</b><span class="small muted">${esc(f.district)} · <span class="num">${kg(f.kg)}</span> กก. · ${f.passesFloor ? 'ผ่านขั้นต่ำ ✓' : 'ต่ำกว่าขั้นต่ำ'}</span></div>
-          <div class="fnet"><b class="num">${baht(f.netPerKg)}</b><span class="small muted">บาท/กก. · รับ <span class="num">${baht(f.netTotal, 0)}</span> บาท</span></div>
+          <div class="fnet"><b class="num">${baht(f.netPerKg)}</b><span class="small muted">บาท/กก. · รับ <span class="num">${baht(f.netTotal, 0)}</span> บาท</span>${f.account ? `<span class="small muted">โอนตรงเข้า ${esc(f.account)}</span>` : ''}</div>
           <span class="seg" role="group" aria-label="อนุมัติของ ${esc(f.name)}"><button type="button" class="yes" data-f="${f.id}" data-v="yes" aria-pressed="${a[f.id] === 'yes'}">ตกลง</button><button type="button" class="no" data-f="${f.id}" data-v="no" aria-pressed="${a[f.id] === 'no'}">ไม่</button></span>
         </li>`).join('')}</ul>
       <p class="small muted" style="margin-top:8px">ผู้ซื้อโอนเงินตรงเข้าบัญชีของเกษตรกรแต่ละคน ระบบไม่ถือเงิน · ราคาขั้นต่ำของแต่ละคนไม่แสดงและไม่ส่งให้ผู้ซื้อ</p>
@@ -334,7 +394,7 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
 
   function renderSide(sc) {
     const g = sc.group;
-    $('#side').innerHTML = approvalHTML(sc) + metricsHTML(sc) + comparison(sc) + `
+    $('#side').innerHTML = approvalHTML(sc) + metricsHTML(sc) + priceChart(sc, buyerNames(sc)) + comparison(sc) + `
       <section class="panel"><h2>กลุ่มเกษตรกร</h2><dl class="kv">
         <dt>พืช</dt><dd>${esc(g.cropLabel)} เกรด ${g.grade}</dd>
         <dt>จังหวัด</dt><dd>${esc(g.province)}</dd>

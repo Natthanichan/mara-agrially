@@ -1,6 +1,8 @@
 // โมเดลข้อมูลหลักของ MaRa-AgriAlly (ข้อมูลจำลองทั้งหมดในต้นแบบ)
 
-export type Crop = 'rice_hommali' | 'bitter_gourd' | 'cassava';
+export type Crop = 'rice_hommali' | 'bitter_gourd' | 'cassava' | 'rubber' | 'corn';
+/** พืชที่ระบบรองรับทั้งหมด (ลำดับนี้ใช้แสดงผล) */
+export const ALL_CROPS: Crop[] = ['rice_hommali', 'rubber', 'corn', 'bitter_gourd', 'cassava'];
 export type Grade = 'A' | 'B' | 'C';
 
 export interface Farmer {

@@ -1,7 +1,7 @@
 // ข้อมูลจำลองสำหรับเดโม — ไม่ใช่ข้อมูลเกษตรกรหรือราคาจริง
 // ราคาขั้นต่ำของข้าวและมันสำปะหลังตั้งให้ใกล้ราคาอ้างอิงจริงจาก NABC (19 ต.ค. 2569):
 //   ข้าวเปลือกหอมมะลิ 105 ≈ 14.40–18.33 บาท/กก. (ร้อยเอ็ด 17.80), มันสำปะหลังสด ≈ 3.65–4.30 บาท/กก.
-// มะระไม่มีใน NABC → ราคาจำลองทั้งหมด
+// มะระไม่มีใน NABC → ราคาจำลองทั้งหมด · ยางพาราและข้าวโพดเลี้ยงสัตว์: ราคาจำลอง (ยังไม่ได้เทียบ NABC)
 
 import type { Crop, Farmer, Listing } from '../core/types.js';
 
@@ -9,7 +9,12 @@ export const CROP_LABEL_TH: Record<Crop, string> = {
   rice_hommali: 'ข้าวเปลือกหอมมะลิ',
   bitter_gourd: 'มะระจีน',
   cassava: 'มันสำปะหลังสด',
+  rubber: 'ยางพาราแผ่นดิบ',
+  corn: 'ข้าวโพดเลี้ยงสัตว์',
 };
+
+/** ชื่อสั้นสำหรับปุ่ม */
+export const CROP_SHORT_TH: Record<Crop, string> = { rice_hommali: 'ข้าว', rubber: 'ยาง', corn: 'ข้าวโพด', bitter_gourd: 'มะระ', cassava: 'มันสำปะหลัง' };
 
 export const farmers: Farmer[] = [
   // กลุ่มข้าวหอมมะลิ ร้อยเอ็ด (ทุ่งกุลาร้องไห้) — เส้นทาง 2 สาย
@@ -25,6 +30,12 @@ export const farmers: Farmer[] = [
   // มันสำปะหลัง นครราชสีมา
   { id: 'F09', name: 'ทองดี มีสุข', province: 'นครราชสีมา', district: 'ด่านขุนทด', routeId: 'NR-1', bankAccountMasked: 'ธ.ก.ส. xxx-x-x9120-x' },
   { id: 'F10', name: 'สายสุนีย์ ปัญญาดี', province: 'นครราชสีมา', district: 'ด่านขุนทด', routeId: 'NR-1', bankAccountMasked: 'ธ.ก.ส. xxx-x-x1058-x' },
+  // ยางพาราแผ่นดิบ สุราษฎร์ธานี (ราคาจำลอง)
+  { id: 'F11', name: 'สมชาย ทองสุข', province: 'สุราษฎร์ธานี', district: 'พุนพิน', routeId: 'SR-1', bankAccountMasked: 'ธ.ก.ส. xxx-x-x1172-x' },
+  { id: 'F12', name: 'จันทร์เพ็ญ ศรีทอง', province: 'สุราษฎร์ธานี', district: 'พุนพิน', routeId: 'SR-1', bankAccountMasked: 'ออมสิน xxx-x-x1265-x' },
+  // ข้าวโพดเลี้ยงสัตว์ เพชรบูรณ์ (ราคาจำลอง)
+  { id: 'F13', name: 'ประเสริฐ ดวงดี', province: 'เพชรบูรณ์', district: 'หล่มสัก', routeId: 'PB-1', bankAccountMasked: 'ธ.ก.ส. xxx-x-x1388-x' },
+  { id: 'F14', name: 'บัวผัน คำแก้ว', province: 'เพชรบูรณ์', district: 'หล่มสัก', routeId: 'PB-1', bankAccountMasked: 'ธ.ก.ส. xxx-x-x1449-x' },
 ];
 
 export const listings: Listing[] = [
@@ -38,4 +49,8 @@ export const listings: Listing[] = [
   { id: 'L08', farmerId: 'F08', crop: 'bitter_gourd', grade: 'A', quantityKg: 1_500, harvestDate: '2026-10-29', deliveryDate: '2026-10-30', floorPricePerKg: 19.0 },
   { id: 'L09', farmerId: 'F09', crop: 'cassava', grade: 'A', quantityKg: 25_000, harvestDate: '2026-12-05', deliveryDate: '2026-12-08', floorPricePerKg: 3.7 },
   { id: 'L10', farmerId: 'F10', crop: 'cassava', grade: 'A', quantityKg: 30_000, harvestDate: '2026-12-06', deliveryDate: '2026-12-09', floorPricePerKg: 3.6 },
+  { id: 'L11', farmerId: 'F11', crop: 'rubber', grade: 'A', quantityKg: 2_500, harvestDate: '2026-11-02', deliveryDate: '2026-11-05', floorPricePerKg: 58.0 },
+  { id: 'L12', farmerId: 'F12', crop: 'rubber', grade: 'A', quantityKg: 3_000, harvestDate: '2026-11-02', deliveryDate: '2026-11-06', floorPricePerKg: 59.0 },
+  { id: 'L13', farmerId: 'F13', crop: 'corn', grade: 'A', quantityKg: 20_000, harvestDate: '2026-11-20', deliveryDate: '2026-11-25', floorPricePerKg: 8.4 },
+  { id: 'L14', farmerId: 'F14', crop: 'corn', grade: 'A', quantityKg: 15_000, harvestDate: '2026-11-21', deliveryDate: '2026-11-26', floorPricePerKg: 8.6 },
 ];

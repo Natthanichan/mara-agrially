@@ -1,18 +1,20 @@
 // ตรรกะของแอป (ไม่ผูกกับ AWS) — Lambda handler แค่แปลง HTTP ↔ ฟังก์ชันเหล่านี้
 // ทุก dependency ส่งเข้ามา (store, LLM, ผู้ซื้อ, ตลาด) จึงเทสได้ครบโดยไม่ต้องใช้ AWS
 
-import { MockBuyerApi } from '../buyer/mockBuyer.js';
+import { DEFAULT_BUYERS, MockBuyerApi } from '../buyer/mockBuyer.js';
+import { checkDealAnomalies, type DealCheck } from '../core/anomaly.js';
+import { computeReputation, seedFeedback, type Reputation } from '../core/reputation.js';
 import { canFinalize, nextDealStatus } from '../core/stateMachine.js';
-import { checkPriceFloor } from '../core/pricing.js';
+import { checkPriceFloor, computeNetPerFarmer } from '../core/pricing.js';
 import { groupListings } from '../core/grouping.js';
 import { Ledger, type LedgerEvent } from '../core/ledger.js';
-import type { Crop, Group } from '../core/types.js';
+import { ALL_CROPS, type Crop, type Group, type Listing } from '../core/types.js';
 import { farmers, listings } from '../data/synthetic.js';
 import { runNegotiation, type AgentDeps } from '../agent/index.js';
 import type { LlmClient } from '../agent/llm/types.js';
 import { planTrips } from '../agent/transport.js';
 import { buildDealView, type DealView } from '../agent/view.js';
-import type { ApprovalDecision, DealRecord, DealStore } from '../store/types.js';
+import type { ApprovalDecision, DealRecord, DealStore, ListingDraft } from '../store/types.js';
 
 export interface AppContext {
   store: DealStore;
@@ -24,6 +26,19 @@ export interface AppContext {
   now?: () => Date;
   dailyLimit?: number;
   newId?: () => string;
+  /** ตัวเชื่อม LINE (ไม่บังคับ) — ถ้าไม่ตั้ง ระบบทำงานเฉพาะหน้าเว็บ/API */
+  line?: LineHooks;
+  /** LLM สำหรับแชตใน LINE (ไม่บังคับ) — ไม่ตั้ง = ใช้การอ่านข้อความแบบกฎเหมือนเดิม */
+  chatLlm?: () => LlmClient | undefined;
+  /** จำนวนข้อความแชตที่เรียก AI ได้ต่อวัน (กันค่าใช้จ่าย) */
+  chatDailyLimit?: number;
+}
+
+export interface LineHooks {
+  /** ประมวลผล webhook ที่ผ่านการตรวจลายเซ็นแล้วเท่านั้น */
+  handleWebhook(rawBody: string, signature: string | undefined, baseUrl?: string): Promise<{ status: number; error?: string }>;
+  /** worker เรียกเมื่อดีลที่เริ่มจาก LINE เจรจาเสร็จ (ส่งผลหาเกษตรกรครั้งเดียว) */
+  notifyDealReady(dealId: string): Promise<void>;
 }
 
 export class AppError extends Error {
@@ -32,33 +47,128 @@ export class AppError extends Error {
   }
 }
 
-const CROPS: Crop[] = ['rice_hommali', 'bitter_gourd', 'cassava'];
-const TITLES: Record<Crop, string> = { rice_hommali: 'ข้าวหอมมะลิ · ร้อยเอ็ด', bitter_gourd: 'มะระจีน · ราชบุรี', cassava: 'มันสำปะหลัง · นครราชสีมา' };
+const CROPS: Crop[] = ALL_CROPS;
+const TITLES: Record<Crop, string> = { rice_hommali: 'ข้าวหอมมะลิ · ร้อยเอ็ด', bitter_gourd: 'มะระจีน · ราชบุรี', cassava: 'มันสำปะหลัง · นครราชสีมา', rubber: 'ยางพารา · สุราษฎร์ธานี', corn: 'ข้าวโพดเลี้ยงสัตว์ · เพชรบูรณ์' };
 
 /** วันที่ตามเวลาไทย (YYYY-MM-DD) */
 export const bangkokDate = (d: Date) => new Date(d.getTime() + 7 * 3600_000).toISOString().slice(0, 10);
 
-const groupFor = (crop: Crop): Group => {
-  const g = groupListings(listings, farmers).find((x) => x.crop === crop);
+/** เกษตรกรในข้อมูลจำลองที่ผู้ใช้ LINE สวมบทบาท (1 คนต่อพืช) */
+export const LINE_FARMER_SLOT: Record<Crop, string> = { rice_hommali: 'F01', bitter_gourd: 'F06', cassava: 'F09', rubber: 'F11', corn: 'F13' };
+
+/** รายการผลผลิตของดีลนี้: ข้อมูลจำลอง โดยแทนที่รายการของเกษตรกรใน LINE ด้วยที่เขาพิมพ์ */
+export const dealListings = (d: Pick<DealRecord, 'listingOverrides'>): Listing[] => {
+  const ov = new Map((d.listingOverrides ?? []).map((l) => [l.farmerId, l]));
+  return ov.size ? listings.map((l) => ov.get(l.farmerId) ?? l) : listings;
+};
+
+/** ราคาขั้นต่ำที่ใช้ตรวจตอนอนุมัติ: คนที่ลงมติยอมขายต่ำกว่าขั้นต่ำของตัวเองแล้ว ไม่ถูกนับว่าไม่ผ่าน */
+const effectiveListings = (d: Pick<DealRecord, 'listingOverrides' | 'floorWaivers'>): Listing[] => {
+  const waived = new Set(d.floorWaivers ?? []);
+  return dealListings(d).map((l) => (waived.has(l.farmerId) ? { ...l, floorPricePerKg: 0 } : l));
+};
+
+const groupFor = (crop: Crop, ls: Listing[] = listings, mustInclude?: string): Group => {
+  const gs = groupListings(ls, farmers).filter((x) => x.crop === crop);
+  if (mustInclude) {
+    const mine = gs.find((x) => x.members.some((m) => m.farmerId === mustInclude));
+    if (!mine) throw new AppError(400, 'ผลผลิตเกรดนี้ยังไม่มีเพื่อนเกษตรกรในกลุ่มเดียวกันให้รวมขาย (ต้องมีอย่างน้อย 2 คน เกรดเดียวกัน จังหวัดเดียวกัน) ลองระบุเกรด A');
+    return mine;
+  }
+  const g = gs[0];
   if (!g) throw new AppError(400, `ไม่มีกลุ่มของพืช ${crop}`);
   return g;
 };
+const groupForDeal = (d: DealRecord) => groupFor(d.crop, dealListings(d), d.lineFarmerId);
 
 const randomId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-export async function startDeal(ctx: AppContext, body: { crop?: unknown }): Promise<{ id: string }> {
-  const crop = body.crop as Crop;
+export interface LineStart {
+  userId: string;
+  draft: ListingDraft;
+  /** ต่อรองใหม่ครั้งที่เท่าไร (0 = ครั้งแรก) */
+  round?: number;
+  baseUrl?: string;
+}
+
+export const MAX_LINE_ROUNDS = 3;
+
+export async function startDeal(ctx: AppContext, body: { crop?: unknown }, opts: { line?: LineStart } = {}): Promise<{ id: string }> {
+  const crop = (opts.line ? opts.line.draft.crop : body.crop) as Crop;
   if (!CROPS.includes(crop)) throw new AppError(400, `crop ต้องเป็น ${CROPS.join(', ')}`);
   const now = (ctx.now ?? (() => new Date()))();
+
+  // ผู้ใช้ LINE สวมบทบาทเกษตรกร 1 คนในกลุ่มจำลอง โดยใช้ผลผลิตที่เขาพิมพ์แทนรายการเดิม
+  let override: Listing | undefined;
+  let lineFarmerId: string | undefined;
+  if (opts.line) {
+    if ((opts.line.round ?? 0) > MAX_LINE_ROUNDS) throw new AppError(409, `ต่อรองใหม่ได้ไม่เกิน ${MAX_LINE_ROUNDS} ครั้งต่อรายการ`);
+    lineFarmerId = LINE_FARMER_SLOT[crop];
+    const base = listings.find((l) => l.farmerId === lineFarmerId)!;
+    const d = opts.line.draft;
+    override = { ...base, grade: d.grade, quantityKg: d.quantityKg, floorPricePerKg: d.floorPricePerKg };
+  }
+  const ls = override ? dealListings({ listingOverrides: [override] }) : listings;
+  const group = groupFor(crop, ls, lineFarmerId); // ตรวจว่าจัดกลุ่มได้ก่อนหักโควตา
+
   if (!(await ctx.store.takeDailyQuota(bangkokDate(now), ctx.dailyLimit ?? 60))) {
     throw new AppError(429, 'วันนี้เจรจาครบโควตาแล้ว (กันค่าใช้จ่าย AI เกินงบ) ลองใหม่พรุ่งนี้');
   }
-  const group = groupFor(crop);
   const id = (ctx.newId ?? randomId)();
   const at = now.toISOString();
-  await ctx.store.createDeal({ id, crop, groupId: group.id, status: 'queued', llm: ctx.llm().name, createdAt: at, updatedAt: at, marketDate: bangkokDate(now), approvals: {} });
+  await ctx.store.createDeal({
+    id,
+    crop,
+    groupId: group.id,
+    status: 'queued',
+    llm: ctx.llm().name,
+    createdAt: at,
+    updatedAt: at,
+    marketDate: bangkokDate(now),
+    approvals: {},
+    ...(opts.line && override && lineFarmerId ? { lineUserId: opts.line.userId, lineFarmerId, listingOverrides: [override], round: opts.line.round ?? 0, ...(opts.line.baseUrl ? { lineBaseUrl: opts.line.baseUrl } : {}) } : {}),
+  });
   await ctx.invokeWorker(id);
   return { id };
+}
+
+/** ประวัติการเจรจาจริงจากที่เก็บข้อมูล → ให้ Agent อ้างเป็นหลักฐานได้ */
+const storeHistory = (store: DealStore) => ({
+  forBuyer: async (buyerId: string, crop: Crop) => (await store.listBuyerOutcomes(buyerId, crop, 5)).map(({ dealId, at, openingPerKg, finalPerKg, decision, chosen }) => ({ dealId, at, openingPerKg, finalPerKg, decision, chosen })),
+  reputation: (buyerId: string) => getBuyerReputation({ store }, buyerId),
+});
+
+/** คะแนนผู้ซื้อ = ประวัติตั้งต้น (จำลอง) + คะแนนที่เกษตรกรให้หลังส่งมอบจริง */
+export async function getBuyerReputation(ctx: Pick<AppContext, 'store'>, buyerId: string): Promise<Reputation> {
+  const stored = await ctx.store.listBuyerFeedback(buyerId, 500);
+  return computeReputation(buyerId, [...seedFeedback(buyerId), ...stored]);
+}
+
+/** บันทึกราคาเปิด/ราคาสุดท้ายของผู้ซื้อแต่ละรายในดีลนี้ — ล้มเหลวได้โดยไม่กระทบผลเจรจา */
+async function recordOutcomes(ctx: AppContext, dealId: string, crop: Crop, trace: { type: string; data: Record<string, unknown> }[], outcome: { kind: string; buyerId?: string }, at: string) {
+  try {
+    const byBuyer = new Map<string, { opening: number; final: number; decision: string }>();
+    for (const t of trace) {
+      if (t.type !== 'buyer_response') continue;
+      const id = String(t.data.buyerId);
+      const price = Number(t.data.pricePerKg);
+      const cur = byBuyer.get(id);
+      byBuyer.set(id, { opening: cur?.opening ?? price, final: price, decision: String(t.data.decision) });
+    }
+    const rows = [...byBuyer].map(([buyerId, v]) => ({ buyerId, crop, dealId, at, openingPerKg: v.opening, finalPerKg: v.final, decision: v.decision, chosen: outcome.kind === 'prepared' && outcome.buyerId === buyerId }));
+    if (rows.length) await ctx.store.recordBuyerOutcomes(rows);
+  } catch (e) {
+    console.error('record buyer outcomes failed', (e as Error).message);
+  }
+}
+
+/** แจ้งผลหาเกษตรกรใน LINE — ล้มเหลวได้โดยไม่ทำให้ดีลพัง */
+async function notifyReady(ctx: AppContext, id: string) {
+  try {
+    await ctx.line?.notifyDealReady(id);
+  } catch (e) {
+    console.error('line notify failed', (e as Error).message);
+  }
 }
 
 /** worker: รันการเจรจา 1 ดีล — เรียกซ้ำได้อย่างปลอดภัย (ทำงานเฉพาะดีลที่ยัง queued) */
@@ -68,11 +178,14 @@ export async function runDeal(ctx: AppContext, id: string): Promise<void> {
   if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
   if (!(await ctx.store.updateDeal(id, { status: 'negotiating', updatedAt: now().toISOString() }, 'queued'))) return; // มีคนรันไปแล้ว
 
-  const group = groupFor(deal.crop);
+  const ls = dealListings(deal);
+  const group = groupForDeal(deal);
   const ledger = new Ledger(now);
   let chain: Promise<void> = Promise.resolve();
   try {
-    const res = await runNegotiation({ dealId: id, group, farmers, listings, date: deal.marketDate }, ctx.agentDeps(), ctx.llm(), {
+    const base = ctx.agentDeps();
+    const deps = { ...base, history: base.history ?? storeHistory(ctx.store) };
+    const res = await runNegotiation({ dealId: id, group, farmers, listings: ls, date: deal.marketDate }, deps, ctx.llm(), {
       ledger,
       now,
       // เขียนเหตุการณ์ตามลำดับทีละรายการ เพื่อให้หน้าเว็บเห็นความคืบหน้าแบบสด
@@ -84,11 +197,14 @@ export async function runDeal(ctx: AppContext, id: string): Promise<void> {
     });
     await chain;
     await ctx.store.updateDeal(id, { status: res.status, outcome: res.outcome, metrics: res.metrics, updatedAt: now().toISOString() });
+    await recordOutcomes(ctx, id, deal.crop, res.trace, res.outcome, now().toISOString());
   } catch (e) {
     await chain.catch(() => undefined);
     await ctx.store.updateDeal(id, { status: 'failed', error: (e as Error).message, updatedAt: now().toISOString() });
+    await notifyReady(ctx, id);
     throw e;
   }
+  await notifyReady(ctx, id);
 }
 
 export interface LiveDealView extends DealView {
@@ -105,7 +221,7 @@ export async function getDeal(ctx: AppContext, id: string): Promise<LiveDealView
   const deal = await ctx.store.getDeal(id);
   if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
   const events = await ctx.store.listEvents(id);
-  const group = groupFor(deal.crop);
+  const group = groupForDeal(deal);
   const view = buildDealView({
     id,
     title: `ดีลสด · ${TITLES[deal.crop]}`,
@@ -114,7 +230,7 @@ export async function getDeal(ctx: AppContext, id: string): Promise<LiveDealView
     status: deal.status,
     group,
     farmers,
-    listings,
+    listings: dealListings(deal),
     trace: events.filter((e) => e.type.startsWith('agent.')).map((e) => ({ type: e.type.slice(6), data: e.data, at: e.at })),
     ...(deal.outcome ? { outcome: deal.outcome } : {}),
     ...(deal.metrics ? { metrics: deal.metrics } : {}),
@@ -149,7 +265,7 @@ function approvalState(deal: DealRecord, group: Group) {
   if (deal.outcome?.kind !== 'prepared') return { ok: false as const, blockedReason: 'ไม่มีดีลให้อนุมัติ' };
   const active = group.members.filter((m) => deal.approvals[m.farmerId] !== 'reject');
   const terms = { ...deal.outcome.terms, trips: planTrips(active, farmers) };
-  const floorPasses = active.length > 0 && checkPriceFloor(active, listings, terms).passes;
+  const floorPasses = active.length > 0 && checkPriceFloor(active, effectiveListings(deal), terms).passes;
   const remainingKg = active.reduce((s, m) => s + m.quantityKg, 0);
   const minKg = buyerMinKg(deal.outcome.buyerId);
   const r = canFinalize({
@@ -165,18 +281,18 @@ function approvalState(deal: DealRecord, group: Group) {
 }
 
 /** เกษตรกรกดอนุมัติ/ปฏิเสธ — บันทึกลง ledger (hash chain ต่อจากของ Agent) แล้วตรวจว่าปิดดีลได้หรือยัง */
-export async function recordApproval(ctx: AppContext, id: string, body: { farmerId?: unknown; decision?: unknown }) {
+export async function recordApproval(ctx: AppContext, id: string, body: { farmerId?: unknown; decision?: unknown }, opts: { simulated?: boolean } = {}) {
   const farmerId = String(body.farmerId ?? '');
   const decision = body.decision as ApprovalDecision;
   if (decision !== 'approve' && decision !== 'reject') throw new AppError(400, 'decision ต้องเป็น approve หรือ reject');
   const now = (ctx.now ?? (() => new Date()))();
   const deal = await ctx.store.getDeal(id);
   if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
-  const group = groupFor(deal.crop);
+  const group = groupForDeal(deal);
   if (!group.members.some((m) => m.farmerId === farmerId)) throw new AppError(400, `เกษตรกร ${farmerId} ไม่ได้อยู่ในกลุ่มนี้`);
   if (!(await ctx.store.setApproval(id, farmerId, decision, now.toISOString()))) throw new AppError(409, 'ดีลนี้ไม่ได้อยู่ในสถานะรออนุมัติแล้ว');
 
-  await appendLedger(ctx, id, { actor: 'farmer', actorId: farmerId, type: `approval.${decision}`, data: { farmerId, decision } }, now);
+  await appendLedger(ctx, id, { actor: 'farmer', actorId: farmerId, type: `approval.${decision}`, data: { farmerId, decision, ...(opts.simulated ? { simulated: true } : {}) } }, now);
 
   const fresh = (await ctx.store.getDeal(id))!;
   const st = approvalState(fresh, group);
@@ -189,6 +305,63 @@ export async function recordApproval(ctx: AppContext, id: string, body: { farmer
   return { status: st.ok ? 'agreed' : 'pending_approval', reason: st.blockedReason, needsRenegotiation: st.needsRenegotiation ?? false };
 }
 
+/**
+ * มติกลุ่ม (Bounded Delegated Negotiation): ข้อเสนอดีที่สุดต่ำกว่าขั้นต่ำของบางคน → น้องมะระตกลงแทนไม่ได้ ต้องให้กลุ่มลงมติ
+ * เสียงข้างมากเห็นด้วย → กลับไปให้ทุกคนกดอนุมัติตามปกติ · คนที่ไม่เห็นด้วยและราคาต่ำกว่าขั้นต่ำของตัวเอง ถอนตัวได้ (ไม่ถูกบังคับขาย)
+ * สมาชิกคนอื่นในเดโมเป็นตัวจำลอง: ผ่านขั้นต่ำ → เห็นด้วย · ต่ำกว่าขั้นต่ำไม่เกิน 3% → เห็นด้วย · มากกว่านั้น → ไม่เห็นด้วย
+ */
+export async function recordGroupVote(ctx: AppContext, id: string, farmerId: string, vote: 'yes' | 'no') {
+  const deal = await ctx.store.getDeal(id);
+  if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
+  if (deal.groupVote) throw new AppError(409, 'กลุ่มลงมติดีลนี้ไปแล้ว');
+  const best = deal.status === 'failed' && deal.outcome?.kind === 'escalated' ? deal.outcome.bestOffer : undefined;
+  if (!best) throw new AppError(409, 'ดีลนี้ไม่มีข้อเสนอให้ลงมติ');
+  const now = (ctx.now ?? (() => new Date()))();
+  const group = groupForDeal(deal);
+  const members = group.members;
+  const terms = { ...best.terms, trips: planTrips(members, farmers) };
+  const nets = computeNetPerFarmer(members, terms);
+  const floors = new Map(dealListings(deal).map((l) => [l.farmerId, l.floorPricePerKg]));
+  const votes = members.map((m) => {
+    const net = nets.find((n) => n.farmerId === m.farmerId)!.netPerKg;
+    const floor = floors.get(m.farmerId) ?? 0;
+    const below = net < floor;
+    const v = m.farmerId === farmerId ? vote : !below || net >= floor * 0.97 ? 'yes' : 'no';
+    return { farmerId: m.farmerId, quantityKg: m.quantityKg, below, vote: v as 'yes' | 'no', simulated: m.farmerId !== farmerId };
+  });
+  for (const v of votes) await appendLedger(ctx, id, { actor: 'farmer', actorId: v.farmerId, type: 'group.vote', data: { farmerId: v.farmerId, vote: v.vote, ...(v.simulated ? { simulated: true } : {}) } }, now);
+  const yes = votes.filter((v) => v.vote === 'yes').length;
+  const no = votes.length - yes;
+  const withdrawn = votes.filter((v) => v.vote === 'no' && v.below).map((v) => v.farmerId);
+  const waivers = votes.filter((v) => v.vote === 'yes' && v.below).map((v) => v.farmerId);
+  const remainingKg = votes.filter((v) => !withdrawn.includes(v.farmerId)).reduce((s, v) => s + v.quantityKg, 0);
+  const result: 'approved' | 'rejected' | 'insufficient' = yes * 2 <= votes.length ? 'rejected' : remainingKg < buyerMinKg(best.buyerId) ? 'insufficient' : 'approved';
+  const groupVote = { yes, no, result, at: now.toISOString() };
+  await appendLedger(ctx, id, { actor: 'system', type: 'group.vote_result', data: { yes, no, result, withdrawn, waivers, pricePerKg: best.terms.pricePerKg, buyerId: best.buyerId } }, now);
+  if (result !== 'approved') {
+    await ctx.store.updateDeal(id, { groupVote, updatedAt: now.toISOString() });
+    return { result, yes, no, total: votes.length, withdrawn: withdrawn.length, userWithdrawn: withdrawn.includes(farmerId) };
+  }
+  const approvals: Record<string, ApprovalDecision> = Object.fromEntries(withdrawn.map((f) => [f, 'reject' as const]));
+  await ctx.store.updateDeal(
+    id,
+    {
+      status: 'pending_approval',
+      outcome: { kind: 'prepared', sessionId: best.sessionId, buyerId: best.buyerId, buyerName: best.buyerName, terms: best.terms, evaluation: best.evaluation, summary: `มติกลุ่ม ${yes}/${votes.length} เห็นด้วยขายให้ ${best.buyerName} ที่ ${best.terms.pricePerKg.toFixed(2)} บาท/กก.` },
+      approvals,
+      floorWaivers: waivers,
+      groupVote,
+      updatedAt: now.toISOString(),
+    },
+    'failed',
+  );
+  return { result, yes, no, total: votes.length, withdrawn: withdrawn.length, userWithdrawn: withdrawn.includes(farmerId) };
+}
+
+/** บันทึกเหตุการณ์ลง ledger (hash chain) ของรหัสใดก็ได้ — ใช้กับการเจรจาฝั่งผู้ซื้อใน LINE ด้วย */
+export const appendAudit = (ctx: AppContext, id: string, ev: { actor: LedgerEvent['actor']; actorId?: string; type: string; data: Record<string, unknown> }) =>
+  appendLedger(ctx, id, ev, (ctx.now ?? (() => new Date()))());
+
 async function appendLedger(ctx: AppContext, id: string, ev: { actor: LedgerEvent['actor']; actorId?: string; type: string; data: Record<string, unknown> }, now: Date) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const ledger = Ledger.from(await ctx.store.listEvents(id), () => now);
@@ -196,4 +369,135 @@ async function appendLedger(ctx: AppContext, id: string, ev: { actor: LedgerEven
     if (await ctx.store.appendEventIfNew(id, e)) return;
   }
   throw new AppError(409, 'บันทึกลง ledger ไม่สำเร็จเพราะมีการแก้ไขพร้อมกัน ลองใหม่อีกครั้ง');
+}
+
+export interface FarmerOffer {
+  buyerName: string;
+  pricePerKg: number;
+  deductions: string[];
+  /** ตัวเลขของเกษตรกรคนนี้ (คิดด้วยโค้ด ไม่ใช่ AI) */
+  mine: { quantityKg: number; netPerKg: number; netTotal: number; transportPerKg: number; floorPerKg: number; passesFloor: boolean };
+  group: { memberCount: number; totalKg: number; netPerKgAvg: number; totalNetBaht: number };
+  /** ราคาตลาดอ้างอิง (มัธยฐาน) ถ้ามี */
+  marketMedianPerKg?: number;
+  /** ค่ารถโดยประมาณของเกษตรกรคนนี้ (เที่ยวรถรวมของเส้นทาง แบ่งตามน้ำหนักที่ส่ง) */
+  transport?: { fromProvince: string; toProvince?: string; tripCostBaht: number; tripKg: number; tripFarmers: number; myTotalBaht: number };
+  /** ยอดก่อนหักค่ารถและส่วนหัก (ราคา × ปริมาณ) */
+  myGrossBaht?: number;
+  /** ความน่าเชื่อถือของผู้ซื้อ (Buyer Reputation Memory) */
+  buyerReputation?: Reputation;
+  paymentTermDays?: number;
+  /** ผลตรวจความผิดปกติก่อนปิดดีล (กฎในโค้ด) */
+  checks?: DealCheck[];
+  /** ใบแบ่งจ่าย: ผู้ซื้อโอนตรงเข้าบัญชีเกษตรกรแต่ละคน ตามน้ำหนักที่ส่งจริง (ระบบไม่ถือเงิน) */
+  payouts?: { label: string; account: string; quantityKg: number; amountBaht: number; mine: boolean }[];
+  /** ดีลนี้มาจากมติกลุ่ม */
+  groupVote?: { yes: number; no: number };
+}
+
+/** ข้อมูลดีลที่ส่งให้เกษตรกรอ่านก่อนกดอนุมัติ */
+export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: string): Promise<FarmerOffer> {
+  const deal = await ctx.store.getDeal(id);
+  if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
+  if (deal.outcome?.kind !== 'prepared') throw new AppError(409, 'ดีลนี้ยังไม่มีข้อเสนอให้อนุมัติ');
+  const group = groupForDeal(deal);
+  const st = approvalState(deal, group);
+  if (!st.terms) throw new AppError(409, 'ดีลนี้ยังไม่มีข้อเสนอให้อนุมัติ');
+  const active = group.members.filter((m) => deal.approvals[m.farmerId] !== 'reject');
+  const nets = computeNetPerFarmer(active, st.terms);
+  const mine = nets.find((n) => n.farmerId === farmerId);
+  const floor = dealListings(deal).find((l) => l.farmerId === farmerId)?.floorPricePerKg;
+  if (!mine || floor === undefined) throw new AppError(400, `เกษตรกร ${farmerId} ไม่ได้อยู่ในดีลนี้`);
+  const totalKg = active.reduce((s, m) => s + m.quantityKg, 0);
+  const totalNet = nets.reduce((s, n) => s + n.netTotal, 0);
+  const trip = st.terms.trips.find((t) => t.farmerIds.includes(farmerId));
+  const tripKg = trip ? active.filter((m) => trip.farmerIds.includes(m.farmerId)).reduce((s, m) => s + m.quantityKg, 0) : 0;
+  const fromProvince = farmers.find((f) => f.id === farmerId)?.province;
+  const buyerId = deal.outcome.buyerId;
+  const buyerCfg = DEFAULT_BUYERS.find((b) => b.id === buyerId);
+  const rep = await getBuyerReputation(ctx, buyerId);
+  let ledgerVerified = true;
+  try {
+    Ledger.from(await ctx.store.listEvents(id));
+  } catch {
+    ledgerVerified = false;
+  }
+  const toProvince = buyerCfg?.province;
+  const transport = trip && fromProvince
+    ? { fromProvince, ...(toProvince ? { toProvince } : {}), tripCostBaht: trip.totalCost, tripKg, tripFarmers: trip.farmerIds.length, myTotalBaht: Math.round(mine.transportPerKg * mine.quantityKg) }
+    : undefined;
+  return {
+    buyerName: deal.outcome.buyerName,
+    pricePerKg: st.terms.pricePerKg,
+    deductions: deal.outcome.evaluation.deductions,
+    mine: { quantityKg: mine.quantityKg, netPerKg: mine.netPerKg, netTotal: mine.netTotal, transportPerKg: mine.transportPerKg, floorPerKg: floor, passesFloor: mine.netPerKg >= floor },
+    group: { memberCount: active.length, totalKg, netPerKgAvg: totalKg > 0 ? Math.floor((totalNet / totalKg) * 100) / 100 : 0, totalNetBaht: Math.round(totalNet * 100) / 100 },
+    ...(deal.metrics?.marketMedianPerKg !== undefined ? { marketMedianPerKg: deal.metrics.marketMedianPerKg } : {}),
+    ...(transport ? { transport } : {}),
+    myGrossBaht: Math.round(st.terms.pricePerKg * mine.quantityKg),
+    buyerReputation: rep,
+    ...(buyerCfg ? { paymentTermDays: buyerCfg.paymentTermDays } : {}),
+    checks: checkDealAnomalies({
+      pricePerKg: st.terms.pricePerKg,
+      ...(deal.metrics?.marketMedianPerKg !== undefined ? { marketMedianPerKg: deal.metrics.marketMedianPerKg } : {}),
+      deductions: st.terms.deductions,
+      totalKg,
+      ...(buyerCfg ? { paymentTermDays: buyerCfg.paymentTermDays, buyerMinKg: buyerCfg.minKg, buyerMaxKg: buyerCfg.maxKg } : {}),
+      passesAllFloors: checkPriceFloor(active, effectiveListings(deal), st.terms).passes,
+      buyerLevel: rep.level,
+      ledgerVerified,
+    }),
+    ...(deal.groupVote ? { groupVote: { yes: deal.groupVote.yes, no: deal.groupVote.no } } : {}),
+    payouts: nets.map((n, i) => ({
+      label: n.farmerId === farmerId ? 'คุณ' : `สมาชิก ${i + 1}`,
+      account: farmers.find((f) => f.id === n.farmerId)?.bankAccountMasked ?? '-',
+      quantityKg: n.quantityKg,
+      amountBaht: Math.round(n.netTotal),
+      mine: n.farmerId === farmerId,
+    })),
+  };
+}
+
+/**
+ * สมาชิกกลุ่มคนอื่นในเดโมเป็นตัวจำลอง — อนุมัติให้อัตโนมัติ (บันทึกใน ledger ว่า simulated)
+ * คืนผลของการอนุมัติครั้งสุดท้าย (หรือสถานะปัจจุบันถ้าไม่มีใครต้องอนุมัติเพิ่ม)
+ */
+export async function approveSimulatedMembers(ctx: AppContext, id: string, exceptFarmerId: string) {
+  const deal = await ctx.store.getDeal(id);
+  if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
+  const group = groupForDeal(deal);
+  let last: Awaited<ReturnType<typeof recordApproval>> | undefined;
+  for (const m of group.members) {
+    if (m.farmerId === exceptFarmerId || deal.approvals[m.farmerId]) continue;
+    try {
+      last = await recordApproval(ctx, id, { farmerId: m.farmerId, decision: 'approve' }, { simulated: true });
+    } catch (e) {
+      if (!(e instanceof AppError && e.status === 409)) throw e;
+    }
+  }
+  if (last) return last;
+  const fresh = (await ctx.store.getDeal(id))!;
+  const st = approvalState(fresh, group);
+  return { status: fresh.status === 'agreed' ? 'agreed' : 'pending_approval', reason: st.blockedReason, needsRenegotiation: st.needsRenegotiation ?? false };
+}
+
+/** เกษตรกรสั่งต่อรองใหม่ — ยกเลิกดีลเดิม (ถ้ายังรออนุมัติ) แล้วเริ่มดีลใหม่ด้วยผลผลิตเดิม */
+export async function renegotiate(ctx: AppContext, id: string, lineUserId: string, baseUrl?: string): Promise<{ id: string }> {
+  const deal = await ctx.store.getDeal(id);
+  if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
+  const mine = deal.listingOverrides?.[0];
+  if (deal.lineUserId !== lineUserId || !mine) throw new AppError(403, 'ดีลนี้ไม่ใช่ของคุณ');
+  if (deal.status !== 'pending_approval' && deal.status !== 'failed') throw new AppError(409, 'ดีลนี้ต่อรองใหม่ไม่ได้แล้ว');
+  const next = (deal.round ?? 0) + 1;
+  if (next > MAX_LINE_ROUNDS) throw new AppError(409, `ต่อรองใหม่ได้ไม่เกิน ${MAX_LINE_ROUNDS} ครั้งต่อรายการ`);
+
+  const draft: ListingDraft = { crop: deal.crop, quantityKg: mine.quantityKg, grade: mine.grade, floorPricePerKg: mine.floorPricePerKg };
+  const created = await startDeal(ctx, {}, { line: { userId: lineUserId, draft, round: next, ...((baseUrl ?? deal.lineBaseUrl) ? { baseUrl: baseUrl ?? deal.lineBaseUrl } : {}) } });
+  if (deal.status === 'pending_approval') {
+    const now = (ctx.now ?? (() => new Date()))();
+    if (await ctx.store.updateDeal(id, { status: nextDealStatus('pending_approval', 'cancelled'), updatedAt: now.toISOString() }, 'pending_approval')) {
+      await appendLedger(ctx, id, { actor: 'farmer', actorId: deal.lineFarmerId ?? '', type: 'deal.renegotiation_requested', data: { newDealId: created.id } }, now);
+    }
+  }
+  return created;
 }

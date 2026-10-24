@@ -6,6 +6,7 @@ export type GuardrailCode =
   | 'below_buyer_offer' // เสนอต่ำกว่าที่ผู้ซื้อให้อยู่แล้ว (ผู้ซื้อจะรับทันที = เสียเงินฟรี)
   | 'private_data_leak' // ข้อความมีตัวเลขราคาขั้นต่ำ
   | 'round_limit' // เจรจากับผู้ซื้อรายนี้ครบจำนวนรอบแล้ว
+  | 'unverified_number' // ข้อความมีตัวเลขที่ไม่มีในทะเบียนหลักฐาน (กันแต่งสถิติ/ราคาคู่แข่ง)
   | 'invalid_input';
 
 export interface GuardrailViolation {
@@ -16,9 +17,25 @@ export interface GuardrailViolation {
 
 const NUM = /\d[\d,]*(?:\.\d+)?/g;
 
-/** ดึงตัวเลขทั้งหมดในข้อความ (รองรับ 41,500 และ 17.65) */
+/** แปลงเลขไทย (๐–๙) เป็นเลขอารบิก — กันการหลบการตรวจด้วยเลขไทย */
+export const toArabicDigits = (text: string) => text.replace(/[๐-๙]/g, (d) => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)));
+
+/** ดึงตัวเลขทั้งหมดในข้อความ (รองรับ 41,500 · 17.65 · เลขไทย) */
 export function extractNumbers(text: string): number[] {
-  return [...text.matchAll(NUM)].map((m) => Number(m[0].replace(/,/g, ''))).filter(Number.isFinite);
+  return [...toArabicDigits(text).matchAll(NUM)].map((m) => Number(m[0].replace(/,/g, ''))).filter(Number.isFinite);
+}
+
+/** จำนวนนับ/ระยะเวลาเล็ก ๆ (เช่น 7 วัน, 2 เที่ยว, 4 ราย) — ไม่ใช่สถิติหรือราคา จึงไม่ต้องมีหลักฐาน แต่ยังผ่านการตรวจการรั่วตามปกติ */
+const COUNT = /(?<![\d.,])(\d{1,2})\s*(วัน|รอบ|ครั้ง|เที่ยว|ราย|คน|เดือน|สัปดาห์|ชั่วโมง|ข้อ|จุด|แปลง)/g;
+export function numbersNeedingEvidence(text: string): number[] {
+  const t = toArabicDigits(text);
+  const counts = [...t.matchAll(COUNT)].map((m) => Number(m[1])).filter((n) => n <= 31);
+  const all = extractNumbers(t);
+  for (const c of counts) {
+    const i = all.indexOf(c);
+    if (i >= 0) all.splice(i, 1);
+  }
+  return all;
 }
 
 /**
@@ -30,7 +47,7 @@ export function checkMessageLeak(message: string, privateNumbers: number[], allo
   for (const n of extractNumbers(message)) {
     if (allowed.some((a) => near(a, n))) continue;
     if (privateNumbers.some((p) => near(p, n))) {
-      return { code: 'private_data_leak', message: 'ข้อความมีตัวเลขที่ตรงกับราคาขั้นต่ำของกลุ่ม ห้ามเปิดเผยให้ผู้ซื้อ เขียนข้อความใหม่โดยไม่ระบุตัวเลขนั้น' };
+      return { code: 'private_data_leak', message: 'ข้อความมีตัวเลขที่ตรงกับราคาขั้นต่ำของสมาชิก (แม้จะมาจากแหล่งอื่น) ระบบไม่ส่งตัวเลขนี้ เพื่อไม่ให้ผู้ซื้อเดาราคาขั้นต่ำได้ เขียนข้อความใหม่โดยไม่ระบุตัวเลขนั้น' };
     }
   }
   return undefined;

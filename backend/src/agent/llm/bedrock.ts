@@ -28,7 +28,8 @@ export class BedrockLlm implements LlmClient {
       modelId: this.opts.modelId,
       system: [{ text: req.system }],
       messages: req.messages as ConverseCommandInput['messages'],
-      toolConfig: { tools: req.tools.map((t) => ({ toolSpec: t })) as NonNullable<ConverseCommandInput['toolConfig']>['tools'] },
+      // Converse ไม่รับ toolConfig ที่ไม่มี tool — แชตบางโหมดไม่ใช้ tool
+      ...(req.tools.length ? { toolConfig: { tools: req.tools.map((t) => ({ toolSpec: t })) as NonNullable<ConverseCommandInput['toolConfig']>['tools'] } } : {}),
       inferenceConfig: { maxTokens: req.maxTokens ?? 1200, temperature: this.opts.temperature ?? 0.2 },
     };
     const out = await this.client.send(new ConverseCommand(input), { abortSignal: req.signal });

@@ -4,6 +4,12 @@
 //   DEALINDEX   / <createdAt>#<id> ดัชนีดีลล่าสุด
 //   QUOTA       / <YYYY-MM-DD>     ตัวนับโควตาการเจรจาต่อวัน
 //   NABC        / <YYYY-MM-DD>     snapshot ราคาตลาดรายวัน (ใช้วิเคราะห์ต่อได้)
+//   LINE#<uid>  / SESSION          สถานะคุยกับเกษตรกรใน LINE (ร่างผลผลิตรอยืนยัน) — มี ttl
+//   LINEEVENT   / <webhookEventId> กัน LINE ส่ง event ซ้ำ — มี ttl
+//   BUYERREQ#<uid>        / <createdAt>#<id>  ความต้องการซื้อของผู้ซื้อ (ดูของตัวเอง)
+//   BUYERREQ#OPEN#<crop>  / <createdAt>#<id>  ดัชนีตามพืช (ไว้จับคู่แจ้งเตือนผู้ซื้อในขั้นต่อไป)
+//   FGROUP#<code>         / META              กลุ่มเพื่อนเกษตรกรที่ผู้ใช้สร้าง (members เป็น string set)
+//   BUYERHIST#<buyer>#<crop> / <at>#<dealId>   ผลการเจรจากับผู้ซื้อแต่ละดีล (หลักฐานประวัติ)
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -17,7 +23,8 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { LedgerEvent } from '../core/ledger.js';
 import type { NabcRecord, SnapshotStore } from '../market/nabcClient.js';
-import type { DealRecord, DealStore } from './types.js';
+import type { BuyerOutcome, BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
+import type { BuyerFeedback } from '../core/reputation.js';
 
 type Doc = Pick<DynamoDBDocumentClient, 'send'>;
 
@@ -46,7 +53,8 @@ export class DynamoDealStore implements DealStore {
   async updateDeal(id: string, patch: Partial<DealRecord>, expectStatus?: DealRecord['status']) {
     const entries = Object.entries(patch).filter(([k, v]) => v !== undefined && k !== 'id');
     if (!entries.length) return true;
-    const names: Record<string, string> = { '#status': 'status' };
+    // DynamoDB ปฏิเสธคำสั่งที่ประกาศ ExpressionAttributeNames แต่ไม่ได้ใช้ → ใส่ #status เฉพาะตอนมีเงื่อนไขสถานะ
+    const names: Record<string, string> = {};
     const values: Record<string, unknown> = {};
     const sets = entries.map(([k, v], i) => {
       names[`#f${i}`] = k;
@@ -55,6 +63,7 @@ export class DynamoDealStore implements DealStore {
     });
     let cond = 'attribute_exists(pk)';
     if (expectStatus) {
+      names['#status'] = 'status';
       cond += ' AND #status = :expect';
       values[':expect'] = expectStatus;
     }
@@ -161,7 +170,117 @@ export class DynamoDealStore implements DealStore {
       throw e;
     }
   }
+
+  async getLineSession(userId: string) {
+    const r = await this.db.send(new GetCommand({ TableName: this.table, Key: { pk: `LINE#${userId}`, sk: 'SESSION' }, ConsistentRead: true }));
+    if (!r.Item) return undefined;
+    const { pk: _pk, sk: _sk, ttl: _ttl, ...rest } = r.Item;
+    return rest as LineSession;
+  }
+
+  async putLineSession(userId: string, s: LineSession) {
+    // เก็บ 30 วันแล้วให้ DynamoDB ลบเอง (TTL)
+    const ttl = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `LINE#${userId}`, sk: 'SESSION', ttl, ...s } }));
+  }
+
+  async createBuyerRequest(r: BuyerRequest) {
+    const sk = `${r.createdAt}#${r.id}`;
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREQ#${r.userId}`, sk, ...r } }));
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREQ#OPEN#${r.crop}`, sk, id: r.id, userId: r.userId, quantityKg: r.quantityKg, offerPerKg: r.offerPerKg, location: r.location } }));
+  }
+
+  async listBuyerRequests(userId: string, limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREQ#${userId}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerRequest);
+  }
+
+  async listOpenBuyerRequestsByCrop(crop: BuyerRequest['crop'], limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREQ#OPEN#${crop}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map((i) => ({ id: String(i.id), userId: String(i.userId), quantityKg: Number(i.quantityKg), offerPerKg: Number(i.offerPerKg), location: String(i.location ?? '') }));
+  }
+
+  async recordBuyerOutcomes(rows: BuyerOutcome[]) {
+    for (const r of rows) {
+      await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERHIST#${r.buyerId}#${r.crop}`, sk: `${r.at}#${r.dealId}`, ...r } }));
+    }
+  }
+
+  async listBuyerOutcomes(buyerId: string, crop: BuyerOutcome['crop'], limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERHIST#${buyerId}#${crop}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerOutcome);
+  }
+
+  async addBuyerFeedback(f: BuyerFeedback) {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREP#${f.buyerId}`, sk: `${f.at}#${f.dealId}`, ...f } }));
+  }
+
+  async listBuyerFeedback(buyerId: string, limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREP#${buyerId}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerFeedback);
+  }
+
+  async createFarmerGroup(g: FarmerGroup) {
+    const { members, ...rest } = g;
+    try {
+      await this.db.send(
+        new PutCommand({ TableName: this.table, Item: { pk: `FGROUP#${g.code}`, sk: 'META', ...rest, members: new Set(members) }, ConditionExpression: 'attribute_not_exists(pk)' }),
+      );
+      return true;
+    } catch (e) {
+      if (isConditionFail(e)) return false;
+      throw e;
+    }
+  }
+
+  async getFarmerGroup(code: string) {
+    const r = await this.db.send(new GetCommand({ TableName: this.table, Key: { pk: `FGROUP#${code}`, sk: 'META' }, ConsistentRead: true }));
+    return r.Item ? toGroup(r.Item) : undefined;
+  }
+
+  async joinFarmerGroup(code: string, userId: string) {
+    try {
+      const r = await this.db.send(
+        new UpdateCommand({
+          TableName: this.table,
+          Key: { pk: `FGROUP#${code}`, sk: 'META' },
+          UpdateExpression: 'ADD members :u',
+          ConditionExpression: 'attribute_exists(pk)',
+          ExpressionAttributeValues: { ':u': new Set([userId]) },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      return r.Attributes ? toGroup(r.Attributes) : undefined;
+    } catch (e) {
+      if (isConditionFail(e)) return undefined;
+      throw e;
+    }
+  }
+
+  async claimWebhookEvent(eventId: string) {
+    const ttl = Math.floor(Date.now() / 1000) + 2 * 86_400;
+    try {
+      await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: 'LINEEVENT', sk: eventId, ttl }, ConditionExpression: 'attribute_not_exists(sk)' }));
+      return true;
+    } catch (e) {
+      if (isConditionFail(e)) return false;
+      throw e;
+    }
+  }
 }
+
+const toGroup = (item: Record<string, unknown>): FarmerGroup => {
+  const { pk: _p, sk: _s, members, ...rest } = item;
+  return { ...(rest as Omit<FarmerGroup, 'members'>), members: [...((members as Set<string> | string[] | undefined) ?? [])] };
+};
 
 /** snapshot ราคา NABC รายวันใน DynamoDB — API ล่มก็ยังมีข้อมูลล่าสุด */
 export class DynamoSnapshotStore implements SnapshotStore {
