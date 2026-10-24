@@ -973,23 +973,46 @@ describe('ผู้ซื้อเจรจาราคากับน้อง�
     expect(contradicts.msg).toContain('กลุ่มยังรับไม่ได้');
   });
 
-  it('ตอนกรอกราคา: แสดงราคาแนะนำจาก NABC พร้อมปุ่มลัด · พืชที่ไม่มีใน NABC บอกตรง ๆ', async () => {
+  it('ตอนกรอกราคา: ราคาตลาด NABC + ค่าขนส่งโดยประมาณ + ราคาส่งถึงที่ พร้อมปุ่มลัด · การ์ดยืนยันมีค่าขนส่ง', async () => {
     const h = setup();
     await h.tap(postbackData('role_buyer'));
     await h.tap(postbackData('buyer_crop', undefined, 'rice_hommali'));
     await h.say('10 ตัน');
-    await h.say('โรงสี จ.ร้อยเอ็ด');
+    await h.say('โรงงานแปรรูป จ.ชลบุรี');
     const m = h.last().messages[0]!;
-    expect(asText(m)).toContain('ราคาแนะนำ');
-    expect(asText(m)).toContain('17.65');
-    expect(asText(m)).toContain('NABC');
-    expect(quick(m).map((a) => a.label)).toContain('17.65 (ราคากลาง)');
+    const t = asText(m);
+    expect(t).toContain('ราคากลาง 17.65');
+    expect(t).toContain('NABC');
+    expect(t).toContain('จ.ร้อยเอ็ด ถึง จ.ชลบุรี (ภาคติดกัน) ประมาณ 0.75 บาท/กก.');
+    expect(t).toContain('รวมราว 7,500 บาท');
+    expect(t).toContain('≈ 18.40 บาท/กก.');
+    expect(t).toContain('ประมาณแบบหยาบ');
+    expect(quick(m).map((a) => a.label)).toEqual(['17.65 ราคาตลาด', '18.40 รวมขนส่ง']);
+    await h.say('18.40');
+    const card = asText(h.last().messages[0]!);
+    expect(card).toContain('ค่าขนส่งโดยประมาณ (จ.ร้อยเอ็ด → จ.ชลบุรี)');
+    expect(card).toContain('184,000 บาท');
 
     const g = setup();
     await g.tap(postbackData('role_buyer'));
     await g.tap(postbackData('buyer_crop', undefined, 'bitter_gourd'));
     await g.say('3 ตัน');
     await g.say('ตลาดไท');
-    expect(asText(g.last().messages[0]!)).toContain('ยังไม่มีราคาอ้างอิงจาก NABC');
+    const gt = asText(g.last().messages[0]!);
+    expect(gt).toContain('ยังไม่มีราคาอ้างอิงจาก NABC');
+    expect(gt).toContain('ใส่ชื่อจังหวัดในที่ส่งมอบ');
+  });
+
+  it('อ่านจังหวัดจากที่อยู่ และประมาณระยะตามภูมิภาค (ครบ 77 จังหวัด)', async () => {
+    const { PROVINCES, findProvince, estimateTransport } = await import('../src/core/transportEstimate.js');
+    expect(PROVINCES).toHaveLength(77);
+    expect(new Set(PROVINCES).size).toBe(77);
+    expect(findProvince('โกดัง กทม.')).toBe('กรุงเทพมหานคร');
+    expect(findProvince('ลานมัน โคราช')).toBe('นครราชสีมา');
+    expect(findProvince('ท่าเรือ จ.สมุทรสาคร')).toBe('สมุทรสาคร');
+    expect(findProvince('ตลาดไท')).toBeUndefined();
+    expect(estimateTransport('ร้อยเอ็ด', 'โรงสี จ.ร้อยเอ็ด', 1000)).toMatchObject({ basis: 'same_province', perKg: 0.2, totalBaht: 200 });
+    expect(estimateTransport('ร้อยเอ็ด', 'ขอนแก่น')).toMatchObject({ basis: 'same_region' });
+    expect(estimateTransport('ร้อยเอ็ด', 'สงขลา')).toMatchObject({ basis: 'far', perKg: 1.1 });
   });
 });

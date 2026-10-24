@@ -6,6 +6,7 @@ import type { Crop } from '../core/types.js';
 import type { BuyerDraft, BuyerRequest, ListingDraft } from '../store/types.js';
 import type { LineMessage } from './client.js';
 import { DECISION_TH, type RoundSummary } from './rounds.js';
+import { BASIS_TH, type TransportEstimate } from '../core/transportEstimate.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
@@ -189,23 +190,51 @@ export interface PriceHint {
   stale: boolean;
 }
 
-export function buyerAskPrice(cropLabel?: string, hint?: PriceHint | null): LineMessage {
-  const lines = ['ราคาที่เสนอซื้อกี่บาทต่อกก. คะ เช่น “18.5”'];
-  if (hint) {
-    lines.push('', `ราคาแนะนำ: ราคากลางตลาด${cropLabel ? `ของ${cropLabel}` : ''} ${baht(hint.medianPerKg)} บาท/กก. (ช่วง ${baht(hint.minPerKg)}–${baht(hint.maxPerKg)})`, `ที่มา: ศูนย์ข้อมูลเกษตร NABC วันที่ ${hint.date}${hint.stale ? ' (ข้อมูลล่าสุดที่มี)' : ''} · เป็นราคาหน้าตลาด ยังไม่รวมค่าขนส่ง`);
-  } else if (hint === null) {
-    lines.push('', `ยังไม่มีราคาอ้างอิงจาก NABC สำหรับ${cropLabel ?? 'พืชนี้'}ค่ะ เสนอราคาที่คุณคิดว่าเหมาะสมได้เลย`);
-  }
-  const m = text(lines.join('\n'));
-  if (!hint) return m;
-  const opts = [...new Set([hint.minPerKg, hint.medianPerKg, hint.maxPerKg].map((n) => baht(n)))];
-  return { ...m, quickReply: { items: opts.map((v, i) => ({ type: 'action', action: { type: 'message', label: `${v}${opts.length === 3 && i === 1 ? ' (ราคากลาง)' : ''}`.slice(0, 20), text: v } })) } };
+const TRANSPORT_NOTE = 'ค่าขนส่งเป็นการประมาณแบบหยาบตามระยะภูมิภาค ไม่ใช่ใบเสนอราคาขนส่งจริง';
+
+function transportLine(t: TransportEstimate | undefined): string | undefined {
+  if (!t) return undefined;
+  if (t.perKg === undefined) return `ค่าขนส่ง: ใส่ชื่อจังหวัดในที่ส่งมอบ แล้วหนูจะประมาณให้ค่ะ (กลุ่มอยู่ จ.${t.fromProvince})`;
+  return `ค่าขนส่งจาก จ.${t.fromProvince} ถึง จ.${t.toProvince} (${BASIS_TH[t.basis!]}) ประมาณ ${baht(t.perKg)} บาท/กก.${t.totalBaht ? ` · รวมราว ${t.totalBaht.toLocaleString('en-US')} บาท` : ''}`;
 }
 
-export function buyerConfirmMessage(d: Required<Omit<BuyerDraft, 'step'>>): LineMessage {
+/** ขั้นกรอกราคาของผู้ซื้อ: ราคาตลาด NABC + ค่าขนส่งโดยประมาณ + ราคาส่งถึงที่โดยประมาณ (พร้อมปุ่มลัด) */
+export function buyerAskPrice(cropLabel?: string, hint?: PriceHint | null, transport?: TransportEstimate): LineMessage {
+  const lines = ['ราคาที่เสนอซื้อกี่บาทต่อกก. คะ (ราคาส่งถึงที่ของคุณ เกษตรกรจัดรถรวมไปส่ง)'];
+  const help: string[] = [];
+  if (hint) help.push(`ราคาตลาดตอนนี้${cropLabel ? `ของ${cropLabel}` : ''}: ราคากลาง ${baht(hint.medianPerKg)} บาท/กก. (ช่วง ${baht(hint.minPerKg)}–${baht(hint.maxPerKg)}) จาก NABC วันที่ ${hint.date}${hint.stale ? ' (ข้อมูลล่าสุดที่มี)' : ''}`);
+  else if (hint === null) help.push(`ยังไม่มีราคาอ้างอิงจาก NABC สำหรับ${cropLabel ?? 'พืชนี้'}ค่ะ`);
+  const tl = transportLine(transport);
+  if (tl) help.push(tl);
+  const delivered = hint && transport?.perKg !== undefined ? Math.round((hint.medianPerKg + transport.perKg) * 100) / 100 : undefined;
+  if (delivered !== undefined) help.push(`ราคาส่งถึงที่โดยประมาณ ≈ ${baht(delivered)} บาท/กก. (ราคากลาง + ค่าขนส่ง)`);
+  if (help.length) lines.push('', 'ข้อมูลช่วยตั้งราคา:', ...help.map((h) => `• ${h}`));
+  if (transport?.perKg !== undefined) lines.push('', TRANSPORT_NOTE);
+  const m = text(lines.join('\n'));
+  const opts: { label: string; value: number }[] = [];
+  if (hint) opts.push({ label: `${baht(hint.medianPerKg)} ราคาตลาด`, value: hint.medianPerKg });
+  if (delivered !== undefined) opts.push({ label: `${baht(delivered)} รวมขนส่ง`, value: delivered });
+  if (!opts.length) return m;
+  return { ...m, quickReply: { items: opts.map((o) => ({ type: 'action', action: { type: 'message', label: o.label.slice(0, 20), text: baht(o.value) } })) } };
+}
+
+export function buyerConfirmMessage(d: Required<Omit<BuyerDraft, 'step'>>, transport?: TransportEstimate): LineMessage {
+  const t = transport?.perKg !== undefined ? transport : undefined;
   return bubble(
     'ตรวจคำขอซื้อก่อนบันทึกค่ะ',
-    [row('ต้องการซื้อ', CROP_LABEL_TH[d.crop], true), row('ปริมาณ', qty(d.quantityKg)), row('สถานที่ส่งมอบ', d.location), row('ราคาที่เสนอ', `${baht(d.offerPerKg)} บาท/กก.`)],
+    [
+      row('ต้องการซื้อ', CROP_LABEL_TH[d.crop], true),
+      row('ปริมาณ', qty(d.quantityKg)),
+      row('สถานที่ส่งมอบ', d.location),
+      row('ราคาที่เสนอ (ส่งถึงที่)', `${baht(d.offerPerKg)} บาท/กก.`),
+      row('มูลค่ารวมโดยประมาณ', `${Math.round(d.offerPerKg * d.quantityKg).toLocaleString('en-US')} บาท`),
+      ...(t
+        ? [
+            row(`ค่าขนส่งโดยประมาณ (จ.${t.fromProvince} → จ.${t.toProvince})`, `${baht(t.perKg!)} บาท/กก. · ราว ${Math.round(t.perKg! * d.quantityKg).toLocaleString('en-US')} บาท`),
+            { type: 'text', text: `ในราคานี้ เกษตรกรเป็นผู้จ่ายค่าขนส่งเอง · ${TRANSPORT_NOTE}`, size: 'xxs', color: '#888888', wrap: true },
+          ]
+        : []),
+    ],
     [button('ยืนยันคำขอซื้อ', postbackData('buyer_confirm'), 'ยืนยันคำขอซื้อ', 'primary', '#3A4C9C'), button('แก้ไข', postbackData('buyer_edit'), 'แก้ไข', 'secondary')],
     `ตรวจคำขอซื้อ: ${CROP_LABEL_TH[d.crop]} ${qty(d.quantityKg)} ส่งที่ ${d.location} เสนอ ${baht(d.offerPerKg)} บาท/กก.`,
   );

@@ -65,6 +65,7 @@ import {
   type OfferExtras,
 } from './flex.js';
 import { negotiationRounds } from './rounds.js';
+import { estimateTransport } from '../core/transportEstimate.js';
 import { MAX_HISTORY, smartChat, type ChatAction } from './chat.js';
 import { apply, decide, extractOffer, groupTerms, MAX_BUYER_ROUNDS, openingAsk, type BuyerNegDecision, type BuyerNegState } from './buyerNegotiation.js';
 import type { ListingDraft } from '../store/types.js';
@@ -310,6 +311,12 @@ export class LineBot implements LineHooks {
     };
   }
 
+  /** ค่าขนส่งโดยประมาณจากจังหวัดของกลุ่มเกษตรกรที่ตรงกับพืชนี้ ไปถึงที่ส่งมอบของผู้ซื้อ */
+  private transportFor(crop: Crop, location: string, quantityKg?: number) {
+    const province = groupsFor(crop)[0]?.province;
+    return province ? estimateTransport(province, location, quantityKg) : undefined;
+  }
+
   /** ราคาอ้างอิงตลาด NABC สำหรับช่วยผู้ซื้อตั้งราคา (null = ไม่มีข้อมูลของพืชนี้) */
   private async priceHint(crop: Crop): Promise<PriceHint | null> {
     const ctx = this.getCtx();
@@ -459,7 +466,7 @@ export class LineBot implements LineHooks {
   private async buyerChatReply(userId: string, chat: ChatAction, reply: (m: LineMessage[]) => Promise<void>, reAsk?: LineMessage) {
     if (chat.kind === 'buyer_request') {
       await this.save(userId, { buyerDraft: { step: 'confirm', ...chat.draft } });
-      return reply([text(chat.text), buyerConfirmMessage(chat.draft)]);
+      return reply([text(chat.text), buyerConfirmMessage(chat.draft, this.transportFor(chat.draft.crop, chat.draft.location, chat.draft.quantityKg))]);
     }
     return reply([text(chat.text), ...(reAsk ? [reAsk] : [])]);
   }
@@ -549,7 +556,7 @@ export class LineBot implements LineHooks {
         const r = parseBuyerLocation(t);
         if (!r.ok) return reply([text(r.problem)]);
         await this.save(userId, { buyerDraft: { ...d, step: 'price', location: r.value } });
-        return reply([buyerAskPrice(d.crop && CROP_LABEL_TH[d.crop], d.crop ? await this.priceHint(d.crop) : undefined)]);
+        return reply([buyerAskPrice(d.crop && CROP_LABEL_TH[d.crop], d.crop ? await this.priceHint(d.crop) : undefined, d.crop ? this.transportFor(d.crop, r.value, d.quantityKg) : undefined)]);
       }
       case 'price': {
         const r = parseBuyerPrice(t);
@@ -557,7 +564,7 @@ export class LineBot implements LineHooks {
         const next: BuyerDraft = { ...d, step: 'confirm', offerPerKg: r.value };
         await this.save(userId, { buyerDraft: next });
         const full = completeBuyerDraft(next);
-        return reply(full ? [buyerConfirmMessage(full)] : [text('ข้อมูลไม่ครบค่ะ ขอเริ่มใหม่นะคะ'), buyerCropMessage()]);
+        return reply(full ? [buyerConfirmMessage(full, this.transportFor(full.crop, full.location, full.quantityKg))] : [text('ข้อมูลไม่ครบค่ะ ขอเริ่มใหม่นะคะ'), buyerCropMessage()]);
       }
       default:
         return reply([text('กดปุ่ม “ยืนยันคำขอซื้อ” หรือ “แก้ไข” ในข้อความด้านบนได้เลยค่ะ หรือพิมพ์ “ยกเลิก”')]);
