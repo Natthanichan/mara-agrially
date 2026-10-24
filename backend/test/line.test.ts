@@ -391,12 +391,20 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
     await h.tap(postbackData('buyer_confirm'));
     expect(h.store.buyerRequests).toHaveLength(1);
     expect(h.store.buyerRequests[0]).toMatchObject({ userId: 'U-farmer', crop: 'rice_hommali', quantityKg: 10_000, location: 'โรงสี ต.บางพลี จ.สมุทรปราการ', offerPerKg: 18.5, status: 'open' });
-    const saved = asText(h.last().messages[0]!);
+    const saved = h.last().messages.map(asText).join(' ');
     expect(saved).toContain('บันทึกคำขอซื้อแล้ว');
-    expect(saved).toContain('เกษตรกร 5 ราย'); // ภาพรวมผลผลิตจำลอง
+    // การ์ดกลุ่มเกษตรกรที่ตรงกับคำขอ: ข้าว เกรด A ร้อยเอ็ด 4 คน 41.5 ตัน พอสำหรับ 10 ตัน
+    const carousel = h.last().messages[1]!;
+    expect((carousel.contents as { type: string }).type).toBe('carousel');
+    expect(saved).toContain('ร้อยเอ็ด');
+    expect(saved).toContain('4 คน');
+    expect(saved).toContain('41.5 ตัน');
+    expect(saved).toContain('พอสำหรับ 10 ตัน');
+    expect(saved).toContain('แจ้งเตือน');
     expect(saved).toContain('กำลังพัฒนา'); // บอกตรงๆ ว่าการคุยต่อรองยังไม่เสร็จ
-    // ไม่มีราคาขั้นต่ำของเกษตรกรหลุดไปถึงผู้ซื้อ
+    // ไม่มีชื่อเกษตรกรหรือราคาขั้นต่ำหลุดไปถึงผู้ซื้อ
     for (const floor of ['16.80', '16.50', '17.00', '16.20', '15.50']) expect(saved).not.toContain(floor);
+    expect(saved).not.toContain('สมศรี');
     expect((await h.store.getLineSession('U-farmer'))?.buyerDraft).toBeUndefined();
   });
 
@@ -582,5 +590,81 @@ describe('DynamoDB: กลุ่มเพื่อนเกษตรกร', () 
     const g = await store.joinFarmerGroup('55555', 'U2');
     expect(sent.at(-1)!.UpdateExpression).toBe('ADD members :u');
     expect(g).toMatchObject({ code: '55555', members: ['U1', 'U2'] });
+  });
+});
+
+describe('แจ้งเตือนผู้ซื้อเมื่อมีกลุ่มเกษตรกรที่ตรงกับคำขอ', () => {
+  const register = async (h: ReturnType<typeof setup>, userId: string, crop: string, location: string) => {
+    await h.tap(postbackData('role_buyer'), userId);
+    await h.tap(postbackData('buyer_crop', undefined, crop as never), userId);
+    await h.say('10 ตัน', userId);
+    await h.say(location, userId);
+    await h.say('18.5', userId);
+    await h.tap(postbackData('buyer_confirm'), userId);
+  };
+
+  it('ผู้ซื้อลงทะเบียนข้าว → เกษตรกรใน LINE เริ่มดีลข้าว → ผู้ซื้อได้ push การ์ดกลุ่ม (ไม่มีขั้นต่ำ/ชื่อ) · ผู้ซื้อมันสำปะหลังไม่ได้', async () => {
+    const h = setup();
+    await register(h, 'U-mill', 'rice_hommali', 'โรงสี อ.เมือง จ.ร้อยเอ็ด');
+    await register(h, 'U-cassava', 'cassava', 'ลานมัน จ.นครราชสีมา');
+    const before = h.sent.length;
+
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_join'));
+    await h.say('12345');
+    await h.say(ROOF);
+    await h.tap(postbackData('confirm'));
+
+    const alerts = h.sent.slice(before).filter((m) => m.kind === 'push' && m.to !== 'U-farmer');
+    expect(alerts.map((a) => a.to)).toEqual(['U-mill']);
+    const card = asText(alerts[0]!.messages[0]!);
+    expect(card).toContain('มีกลุ่มเกษตรกรใหม่');
+    expect(card).toContain('ร้อยเอ็ด (จังหวัดเดียวกับที่ส่งมอบ)');
+    expect(card).toContain('41.5 ตัน');
+    expect(card).toContain('18.50');
+    expect(card).not.toContain('16.80');
+    expect(card).not.toContain('สมศรี');
+  });
+
+  it('ผู้ซื้อคนเดียวมีหลายคำขอ ได้แจ้งครั้งเดียว · เกษตรกรไม่ถูกแจ้งเตือนตัวเอง · แจ้งไม่เกิน 5 คน', async () => {
+    const h = setup();
+    await register(h, 'U-mill', 'rice_hommali', 'ร้อยเอ็ด');
+    await register(h, 'U-mill', 'rice_hommali', 'ร้อยเอ็ด');
+    await register(h, 'U-farmer', 'rice_hommali', 'ร้อยเอ็ด'); // คนเดียวกับเกษตรกร
+    for (let i = 0; i < 7; i++) await register(h, `U-b${i}`, 'rice_hommali', 'กรุงเทพ');
+    const before = h.sent.length;
+    await h.say('เมนู');
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_auto'));
+    await h.say(ROOF);
+    await h.tap(postbackData('confirm'));
+    const alerted = h.sent.slice(before).filter((m) => m.kind === 'push' && JSON.stringify(m.messages).includes('มีกลุ่มเกษตรกรใหม่')).map((m) => m.to);
+    expect(alerted).toHaveLength(5);
+    expect(new Set(alerted).size).toBe(5);
+    expect(alerted).not.toContain('U-farmer');
+  });
+
+  it('push ไปผู้ซื้อล้มเหลว → เกษตรกรยังได้ข้อความเริ่มเจรจาและผลตามปกติ', async () => {
+    const h = setup();
+    await register(h, 'U-mill', 'rice_hommali', 'ร้อยเอ็ด');
+    const bot = h.ctx.line as unknown as { makeClient: (t: string) => { reply: unknown; push: (to: string, m: LineMessage[]) => Promise<void> } };
+    const orig = bot.makeClient;
+    bot.makeClient = (t) => {
+      const c = orig(t);
+      return { ...c, push: async (to, m) => { if (to === 'U-mill') throw new Error('quota'); return c.push(to, m); } };
+    };
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_auto'));
+    await h.say(ROOF);
+    await h.tap(postbackData('confirm'));
+    expect(h.sent.some((m) => m.kind === 'push' && m.to === 'U-farmer')).toBe(true);
+    const deal = [...h.store.deals.values()].find((d) => d.lineUserId === 'U-farmer');
+    expect(deal?.status).toBe('pending_approval');
+  });
+
+  it('ยังไม่มีกลุ่มของพืชนั้น → บอกว่าจะแจ้งเตือนเมื่อมี', async () => {
+    const { buyerMatchesMessages } = await import('../src/line/flex.js');
+    const msgs = buyerMatchesMessages({ crop: 'cassava', quantityKg: 1000, offerPerKg: 4, location: 'x' }, []);
+    expect(msgs.map(asText).join(' ')).toContain('จะแจ้งเตือนคุณทันที');
   });
 });

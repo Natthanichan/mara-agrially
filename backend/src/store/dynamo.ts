@@ -185,7 +185,7 @@ export class DynamoDealStore implements DealStore {
   async createBuyerRequest(r: BuyerRequest) {
     const sk = `${r.createdAt}#${r.id}`;
     await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREQ#${r.userId}`, sk, ...r } }));
-    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREQ#OPEN#${r.crop}`, sk, id: r.id, userId: r.userId, quantityKg: r.quantityKg, offerPerKg: r.offerPerKg } }));
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERREQ#OPEN#${r.crop}`, sk, id: r.id, userId: r.userId, quantityKg: r.quantityKg, offerPerKg: r.offerPerKg, location: r.location } }));
   }
 
   async listBuyerRequests(userId: string, limit: number) {
@@ -193,6 +193,13 @@ export class DynamoDealStore implements DealStore {
       new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREQ#${userId}` }, ScanIndexForward: false, Limit: limit }),
     );
     return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerRequest);
+  }
+
+  async listOpenBuyerRequestsByCrop(crop: BuyerRequest['crop'], limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREQ#OPEN#${crop}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map((i) => ({ id: String(i.id), userId: String(i.userId), quantityKg: Number(i.quantityKg), offerPerKg: Number(i.offerPerKg), location: String(i.location ?? '') }));
   }
 
   async createFarmerGroup(g: FarmerGroup) {

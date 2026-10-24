@@ -155,21 +155,71 @@ export function buyerConfirmMessage(d: Required<Omit<BuyerDraft, 'step'>>): Line
   );
 }
 
-/** supply = ภาพรวมผลผลิตที่มีในระบบ (ข้อมูลจำลอง) ไม่มีราคาขั้นต่ำของใครทั้งสิ้น */
-export function buyerSavedMessage(d: Pick<BuyerRequest, 'crop' | 'quantityKg' | 'offerPerKg'>, supply: { farmers: number; totalKg: number; provinces: string[] }): LineMessage {
-  const have = supply.farmers > 0 ? `ตอนนี้ในระบบมีเกษตรกร ${supply.farmers} ราย รวม ${qty(supply.totalKg)} (${supply.provinces.join(', ')})` : 'ตอนนี้ยังไม่มีเกษตรกรที่ลงทะเบียนผลผลิตนี้ไว้';
-  return text(
-    [
-      'บันทึกคำขอซื้อแล้วค่ะ ✓',
-      `${CROP_LABEL_TH[d.crop]} ${qty(d.quantityKg)} เสนอ ${baht(d.offerPerKg)} บาท/กก.`,
-      '',
-      have,
-      '',
-      'ขั้นต่อไป (กำลังพัฒนา): น้องมะระจะแจ้งเตือนเมื่อมีเกษตรกรที่ตรงกับที่คุณต้องการ และคุยต่อรองกับคุณที่นี่ค่ะ',
-      '',
-      MOCK_NOTE,
-    ].join('\n'),
-  );
+/** กลุ่มเกษตรกรที่แสดงให้ผู้ซื้อเห็น — ข้อมูลรวมของกลุ่มเท่านั้น ไม่มีชื่อ บัญชี หรือราคาขั้นต่ำของใคร */
+export interface GroupForBuyer {
+  cropLabel: string;
+  grade: string;
+  province: string;
+  members: number;
+  totalKg: number;
+  window: { from: string; to: string };
+}
+
+const thaiDate = (iso: string) => {
+  const [, m, d] = iso.split('-').map(Number);
+  return `${d} ${['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'][(m ?? 1) - 1]}`;
+};
+
+/** ที่ส่งมอบของผู้ซื้อ (ข้อความอิสระ) ระบุจังหวัดเดียวกับกลุ่มไหม — เทียบข้อความอย่างเดียว ไม่ได้คำนวณระยะทาง */
+export const sameProvince = (location: string, province: string) => location.replace(/\s/g, '').includes(province.replace(/\s/g, ''));
+
+function groupBubble(g: GroupForBuyer, req: { quantityKg: number; location: string }, title: string) {
+  const enough = g.totalKg >= req.quantityKg;
+  return {
+    type: 'bubble',
+    size: 'kilo',
+    header: { type: 'box', layout: 'vertical', backgroundColor: '#E5E8F6', contents: [{ type: 'text', text: title, weight: 'bold', size: 'sm', color: '#3A4C9C', wrap: true }] },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      contents: [
+        { type: 'text', text: `${g.cropLabel} เกรด ${g.grade}`, weight: 'bold', size: 'md', wrap: true },
+        row('จังหวัด', `${g.province}${sameProvince(req.location, g.province) ? ' (จังหวัดเดียวกับที่ส่งมอบ)' : ''}`),
+        row('สมาชิก', `${g.members} คน`),
+        row('ปริมาณรวม', qty(g.totalKg)),
+        row('ส่งมอบได้', g.window.from === g.window.to ? thaiDate(g.window.from) : `${thaiDate(g.window.from)} – ${thaiDate(g.window.to)}`),
+        row('เทียบกับที่คุณต้องการ', enough ? `พอสำหรับ ${qty(req.quantityKg)} ✓` : `ได้ ${qty(g.totalKg)} จาก ${qty(req.quantityKg)}`),
+        { type: 'separator' },
+        { type: 'text', text: MOCK_NOTE, size: 'xxs', color: '#888888', wrap: true },
+      ],
+    },
+  };
+}
+
+/** หลังผู้ซื้อยืนยันคำขอ: กลุ่มเกษตรกรที่ตรงกับพืชที่ต้องการ (ใกล้ที่ส่งมอบก่อน) */
+export function buyerMatchesMessages(req: Pick<BuyerRequest, 'crop' | 'quantityKg' | 'offerPerKg' | 'location'>, groups: GroupForBuyer[]): LineMessage[] {
+  const head = text(`บันทึกคำขอซื้อแล้วค่ะ ✓\n${CROP_LABEL_TH[req.crop]} ${qty(req.quantityKg)} ส่งที่ ${req.location} เสนอ ${baht(req.offerPerKg)} บาท/กก.`);
+  if (!groups.length) return [head, text('ตอนนี้ยังไม่มีกลุ่มเกษตรกรที่ปลูกพืชนี้ค่ะ ถ้ามีกลุ่มใหม่ น้องมะระจะแจ้งเตือนคุณทันทีนะคะ 🔔')];
+  const sorted = [...groups].sort((a, b) => Number(sameProvince(req.location, b.province)) - Number(sameProvince(req.location, a.province)) || b.totalKg - a.totalKg).slice(0, 10);
+  return [
+    head,
+    {
+      type: 'flex',
+      altText: `กลุ่มเกษตรกรที่ตรงกับคำขอของคุณ ${sorted.length} กลุ่ม`,
+      contents: { type: 'carousel', contents: sorted.map((g) => groupBubble(g, req, 'กลุ่มเกษตรกรที่ตรงกับคำขอ')) },
+    },
+    text('ถ้ามีกลุ่มใหม่ที่ตรงกับคำขอ น้องมะระจะแจ้งเตือนคุณที่นี่ค่ะ 🔔\nขั้นต่อไป (กำลังพัฒนา): คุยต่อรองกับน้องมะระแทนกลุ่มเกษตรกรได้เลย'),
+  ];
+}
+
+/** แจ้งเตือนผู้ซื้อ: มีกลุ่มเกษตรกรใหม่ที่ตรงกับคำขอซื้อ */
+export function buyerAlertMessage(g: GroupForBuyer, req: { quantityKg: number; location: string; offerPerKg: number }): LineMessage {
+  return {
+    type: 'flex',
+    altText: `🔔 มีกลุ่มเกษตรกรใหม่: ${g.cropLabel} จ.${g.province} ${g.members} คน รวม ${qty(g.totalKg)}`,
+    contents: groupBubble(g, req, `🔔 มีกลุ่มเกษตรกรใหม่ตรงกับคำขอของคุณ (เสนอ ${baht(req.offerPerKg)} บาท/กก.)`),
+  };
 }
 
 export function buyerRequestsMessage(list: BuyerRequest[]): LineMessage {

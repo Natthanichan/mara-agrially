@@ -109,6 +109,8 @@ export interface DealStore {
   createBuyerRequest(r: BuyerRequest): Promise<void>;
   /** คำขอซื้อของผู้ใช้คนนี้ ใหม่สุดก่อน */
   listBuyerRequests(userId: string, limit: number): Promise<BuyerRequest[]>;
+  /** คำขอซื้อที่เปิดอยู่ของพืชนี้ (ทุกผู้ซื้อ) ใหม่สุดก่อน — ใช้แจ้งเตือนเมื่อมีกลุ่มเกษตรกรที่ตรงกัน */
+  listOpenBuyerRequestsByCrop(crop: Crop, limit: number): Promise<Pick<BuyerRequest, 'id' | 'userId' | 'quantityKg' | 'offerPerKg' | 'location'>[]>;
   /** สร้างกลุ่ม คืน false ถ้ารหัสนี้มีอยู่แล้ว */
   createFarmerGroup(g: FarmerGroup): Promise<boolean>;
   getFarmerGroup(code: string): Promise<FarmerGroup | undefined>;

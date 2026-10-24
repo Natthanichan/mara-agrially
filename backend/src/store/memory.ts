@@ -71,6 +71,13 @@ export class MemoryDealStore implements DealStore {
   async listBuyerRequests(userId: string, limit: number) {
     return this.buyerRequests.filter((r) => r.userId === userId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit).map((r) => structuredClone(r));
   }
+  async listOpenBuyerRequestsByCrop(crop: BuyerRequest['crop'], limit: number) {
+    return this.buyerRequests
+      .filter((r) => r.crop === crop && r.status === 'open')
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit)
+      .map(({ id, userId, quantityKg, offerPerKg, location }) => ({ id, userId, quantityKg, offerPerKg, location }));
+  }
   async createFarmerGroup(g: FarmerGroup) {
     if (this.groups.has(g.code)) return false;
     this.groups.set(g.code, structuredClone(g));

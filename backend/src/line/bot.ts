@@ -40,7 +40,9 @@ import {
   buyerConfirmMessage,
   buyerCropMessage,
   buyerRequestsMessage,
-  buyerSavedMessage,
+  buyerAlertMessage,
+  buyerMatchesMessages,
+  type GroupForBuyer,
   confirmMessage,
   failedMessage,
   helpMessage,
@@ -83,12 +85,15 @@ function mockGroupInfo() {
 const completeBuyerDraft = (d: BuyerDraft) =>
   d.crop && d.quantityKg !== undefined && d.location && d.offerPerKg !== undefined ? { crop: d.crop, quantityKg: d.quantityKg, location: d.location, offerPerKg: d.offerPerKg } : undefined;
 
-/** ภาพรวมผลผลิตของพืชนี้ในระบบ (ข้อมูลจำลอง) — ไม่มีราคาขั้นต่ำของใคร */
-function supplyOf(crop: Crop) {
-  const ls = listings.filter((l) => l.crop === crop);
-  const provinces = [...new Set(ls.flatMap((l) => farmers.find((f) => f.id === l.farmerId)?.province ?? []))];
-  return { farmers: new Set(ls.map((l) => l.farmerId)).size, totalKg: ls.reduce((n, l) => n + l.quantityKg, 0), provinces };
+/** กลุ่มเกษตรกร (ข้อมูลจำลอง) ของพืชนี้ ในรูปที่แสดงให้ผู้ซื้อได้ — ไม่มีราคาขั้นต่ำ */
+function groupsFor(crop: Crop): GroupForBuyer[] {
+  return groupListings(listings, farmers)
+    .filter((g) => g.crop === crop)
+    .map((g) => ({ cropLabel: CROP_LABEL_TH[g.crop], grade: g.grade, province: g.province, members: g.members.length, totalKg: g.members.reduce((n, m) => n + m.quantityKg, 0), window: g.deliveryWindow }));
 }
+
+/** แจ้งเตือนผู้ซื้อได้กี่คนต่อกลุ่มใหม่ (push นับโควตาข้อความของ LINE OA) */
+export const MAX_BUYER_ALERTS = 5;
 
 const STATUS_TH: Record<string, string> = {
   queued: 'รอเริ่มเจรจา',
@@ -150,7 +155,7 @@ export class LineBot implements LineHooks {
         if (ev.message?.type !== 'text' || typeof ev.message.text !== 'string') return await reply([text('ส่งเป็นข้อความตัวอักษรนะคะ เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”')]);
         return await this.onText(userId, ev.message.text.slice(0, 1000), reply);
       }
-      if (ev.type === 'postback' && ev.postback?.data) return await this.onPostback(userId, ev.postback.data, reply);
+      if (ev.type === 'postback' && ev.postback?.data) return await this.onPostback(userId, ev.postback.data, reply, client);
     } catch (e) {
       if (e instanceof AppError) return await reply([text(e.message)]);
       throw e;
@@ -263,7 +268,7 @@ export class LineBot implements LineHooks {
     }
   }
 
-  private async onPostback(userId: string, data: string, reply: (m: LineMessage[]) => Promise<void>) {
+  private async onPostback(userId: string, data: string, reply: (m: LineMessage[]) => Promise<void>, client: Pick<LineClient, 'push'>) {
     const pb = parsePostback(data);
     if (!pb) return;
     const ctx = this.getCtx();
@@ -305,7 +310,7 @@ export class LineBot implements LineHooks {
         await this.save(userId, { buyerDraft: session!.buyerDraft });
         throw e;
       }
-      return reply([buyerSavedMessage(full, supplyOf(full.crop))]);
+      return reply(buyerMatchesMessages(full, groupsFor(full.crop)));
     }
 
     if (pb.act === 'edit') {
@@ -328,7 +333,9 @@ export class LineBot implements LineHooks {
         await this.save(userId, { draft }); // ให้กดยืนยันซ้ำได้ (เช่น โควตาเต็ม)
         throw e;
       }
-      return reply([...(await this.groupSummary(dealId, session)), startedMessage()]);
+      await reply([...(await this.groupSummary(dealId, session)), startedMessage()]);
+      await this.alertBuyers(dealId, userId, client);
+      return;
     }
 
     // อนุมัติ / ไม่เอา / ต่อรองใหม่ ต้องมี dealId และต้องเป็นดีลของผู้ใช้คนนี้เท่านั้น
@@ -361,6 +368,27 @@ export class LineBot implements LineHooks {
       return reply([text('บันทึกแล้ว ✓ คุณไม่เอาดีลนี้และถอนตัวจากกลุ่ม\nกลุ่มที่เหลือ (ตัวจำลอง) ผ่านเกณฑ์ราคาและปริมาณ จึงไปต่อและตกลงดีลได้โดยไม่รวมผลผลิตของคุณ\n\n' + MOCK_NOTE)]);
     }
     return reply(this.notAgreed('บันทึกแล้ว ✓ คุณไม่เอาดีลนี้และถอนตัวจากกลุ่ม', r, pb.dealId));
+  }
+
+  /** มีกลุ่มเกษตรกรพร้อมขาย → แจ้งผู้ซื้อที่มีคำขอซื้อพืชนี้เปิดอยู่ (คนละ 1 ข้อความ) — ล้มเหลวได้โดยไม่กระทบเกษตรกร */
+  private async alertBuyers(dealId: string, farmerUserId: string, client: Pick<LineClient, 'push'>) {
+    try {
+      const ctx = this.getCtx();
+      const v = await getDeal(ctx, dealId);
+      const g: GroupForBuyer = { cropLabel: v.group.cropLabel, grade: v.group.grade, province: v.group.province, members: v.group.members, totalKg: v.group.totalKg, window: v.group.window };
+      const crop = (await ctx.store.getDeal(dealId))!.crop;
+      const seen = new Set<string>([farmerUserId]);
+      const requests = (await ctx.store.listOpenBuyerRequestsByCrop(crop, 50)).filter((r) => !seen.has(r.userId) && (seen.add(r.userId), true)).slice(0, MAX_BUYER_ALERTS);
+      for (const r of requests) {
+        try {
+          await client.push(r.userId, [buyerAlertMessage(g, r)]);
+        } catch (e) {
+          console.error('buyer alert failed:', (e as Error).message);
+        }
+      }
+    } catch (e) {
+      console.error('buyer alerts skipped:', (e as Error).message);
+    }
   }
 
   /** บอกเกษตรกรว่าผลผลิตถูกรวมกับกลุ่มไหน — ล้มเหลวได้โดยไม่กระทบการเจรจา */
