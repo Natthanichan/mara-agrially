@@ -668,3 +668,143 @@ describe('แจ้งเตือนผู้ซื้อเมื่อมี�
     expect(msgs.map(asText).join(' ')).toContain('จะแจ้งเตือนคุณทันที');
   });
 });
+
+// ---------- แชตอัจฉริยะ (LLM จำลองแบบสคริปต์) ----------
+describe('แชตกับน้องมะระใน LINE (AI)', () => {
+  type Step = (req: { system: string; messages: { role: string; content: unknown[] }[] }) => unknown[];
+  const scriptedChat = (steps: Step[]) => {
+    const seen: { system: string; messages: { role: string; content: unknown[] }[] }[] = [];
+    let i = 0;
+    return {
+      seen,
+      llm: { name: 'scripted-chat', converse: async (req: any) => (seen.push(req), { content: steps[Math.min(i++, steps.length - 1)]!(req) as any }) },
+    };
+  };
+  const tool = (name: string, input: Record<string, unknown>) => ({ toolUse: { toolUseId: 't1', name, input } });
+  const withChat = (steps: Step[], opts: { limit?: number } = {}) => {
+    const h = setup();
+    const c = scriptedChat(steps);
+    h.ctx.chatLlm = () => c.llm as never;
+    h.ctx.chatDailyLimit = opts.limit ?? 50;
+    return { ...h, ...c };
+  };
+  const startDealAsFarmer = async (h: ReturnType<typeof setup>) => {
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_join'));
+    await h.say('12345');
+    await h.say(ROOF); // พิมพ์ครบ → ไม่เรียก AI
+    await h.tap(postbackData('confirm'));
+  };
+
+  it('เกษตรกรถาม "ทำไมได้ราคานี้" → AI ได้บริบทดีล (ข้อเสนอ, แต่ละรอบ) และตอบด้วยตัวเลขจากบริบท', async () => {
+    let price = '';
+    const h = withChat([
+      (req) => {
+        price = /"pricePerKg":([\d.]+)/.exec(req.system)![1]!;
+        const net = /"netPerKg":([\d.]+)/.exec(req.system)![1]!;
+        return [{ text: `น้องมะระต่อรองกับโรงสีจำลอง C จนได้ ${price} บาท/กก. คุณได้สุทธิ ${net} บาท/กก. ค่ะ` }];
+      },
+    ]);
+    await startDealAsFarmer(h);
+    expect(h.seen).toHaveLength(0); // พิมพ์ผลผลิตครบ ไม่เรียก AI
+    await h.say('ทำไมได้ราคานี้');
+    expect(asText(h.last().messages[0]!)).toContain(`ได้ ${price} บาท`);
+    const sys = h.seen[0]!.system;
+    expect(sys).toContain('"rounds"');
+    expect(sys).toContain('โรงสีจำลอง C');
+    expect(sys).toContain('"floorPerKg":16.8'); // ขั้นต่ำของตัวเองอยู่ในบริบทได้
+    for (const other of ['บุญมา', 'คำปุน', 'ประยูร']) expect(sys).not.toContain(other); // ไม่มีชื่อ/ข้อมูลสมาชิกคนอื่น
+    expect((await h.store.getLineSession('U-farmer'))?.chat?.length).toBe(2);
+  });
+
+  it('คำตอบมีตัวเลขที่ไม่มีในบริบท → ให้ตอบใหม่ 1 ครั้ง · ยังแต่งอีก → ตอบแบบปลอดภัย ไม่ส่งตัวเลขนั้น', async () => {
+    const h = withChat([() => [{ text: 'พ่อค้าคนกลางให้ 21.50 บาทค่ะ' }], () => [{ text: 'ราคาตลาดวันนี้ 17.65 บาท/กก. ค่ะ' }]]);
+    await startDealAsFarmer(h);
+    await h.say('คนกลางให้เท่าไร');
+    expect(asText(h.last().messages[0]!)).toContain('17.65');
+    expect(String(h.seen[1]!.messages.at(-1)!.content[0] && (h.seen[1]!.messages.at(-1)!.content[0] as any).text)).toContain('21.5');
+
+    const h2 = withChat([() => [{ text: 'คนกลางให้ 21.50 บาทค่ะ' }]]);
+    await startDealAsFarmer(h2);
+    await h2.say('คนกลางให้เท่าไร');
+    const out = asText(h2.last().messages[0]!);
+    expect(out).not.toContain('21.50');
+    expect(out).toContain('ยืนยันได้');
+  });
+
+  it('เกษตรกรพิมพ์แบบภาษาพูด → AI เสนอรายการ → การ์ดยืนยัน (ยังไม่เริ่มเจรจา) · ราคาขั้นต่ำต้องมาจากผู้ใช้', async () => {
+    const h = withChat([() => [tool('propose_listing', { crop: 'rice_hommali', quantity_kg: 8000, floor_price_per_kg: 17.2, reply: 'สรุปให้แล้วค่ะ' })]]);
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_auto'));
+    await h.say('ปีนี้ได้ข้าวหอมมะลิมาแปดตันค่ะ อยากได้อย่างน้อย 17.2');
+    expect(buttons(h.last().messages[1]!).map((b) => b.label)).toEqual(['ยืนยัน เริ่มเจรจา', 'แก้ไข']);
+    expect((await h.store.getLineSession('U-farmer'))?.draft).toMatchObject({ quantityKg: 8000, floorPricePerKg: 17.2 });
+    expect(h.store.deals.size).toBe(0);
+
+    const g = withChat([() => [tool('propose_listing', { crop: 'rice_hommali', quantity_kg: 8000, floor_price_per_kg: 17.9, reply: 'ok' })]]);
+    await g.tap(postbackData('role_farmer'));
+    await g.tap(postbackData('group_auto'));
+    await g.say('มีข้าวหอมมะลิแปดตัน ช่วยตั้งราคาให้หน่อย'); // ไม่ได้บอกขั้นต่ำ → AI ห้ามเดา
+    expect(asText(g.last().messages[0]!)).toContain('ราคาสุทธิขั้นต่ำ');
+    expect((await g.store.getLineSession('U-farmer'))?.draft).toBeUndefined();
+  });
+
+  it('ผู้ซื้อถาม "ทำไมต้องจ่ายแพงกว่านี้" → AI ได้ราคาตลาด NABC และข้อมูลกลุ่มแบบรวม ไม่มีชื่อหรือราคาขั้นต่ำของเกษตรกร', async () => {
+    const h = withChat([() => [{ text: 'ราคากลางตลาด NABC วันนี้ 17.65 บาท/กก. และกลุ่มส่งเป็นล็อตเดียว 41,500 กก. ค่ะ' }]]);
+    await h.tap(postbackData('role_buyer'));
+    await h.say('ยกเลิก');
+    await h.say('ทำไมผมต้องจ่ายแพงกว่านี้');
+    expect(asText(h.last().messages[0]!)).toContain('17.65');
+    const sys = h.seen[0]!.system;
+    expect(sys).toContain('"medianPerKg":17.65');
+    expect(sys).toContain('ร้อยเอ็ด');
+    for (const secret of ['สมศรี', 'บุญมา', 'floorPrice', '16.8', '16.2', 'bankAccount']) expect(sys).not.toContain(secret);
+  });
+
+  it('ผู้ซื้อถามกลับระหว่างกรอกคำขอ → AI ตอบ แล้วถามคำถามเดิมซ้ำ · AI เสนอคำขอซื้อ → การ์ดยืนยัน → บันทึกได้', async () => {
+    const h = withChat([
+      () => [{ text: 'กลุ่มข้าวที่ร้อยเอ็ดมี 41,500 กก. ค่ะ' }],
+      () => [tool('propose_buyer_request', { crop: 'rice_hommali', quantity_kg: 10000, location: 'โรงสี จ.ร้อยเอ็ด', offer_per_kg: 18.2, reply: 'สรุปคำขอให้แล้วค่ะ' })],
+    ]);
+    await h.tap(postbackData('role_buyer'));
+    await h.tap(postbackData('buyer_crop', undefined, 'rice_hommali'));
+    await h.say('มีของเท่าไรบ้าง');
+    expect(asText(h.last().messages[0]!)).toContain('41,500');
+    expect(asText(h.last().messages[1]!)).toContain('เท่าไหร่'); // ถามปริมาณซ้ำ
+    await h.say('ยกเลิก');
+    await h.say('อยากได้ข้าวหอมมะลิ 10 ตัน ส่งโรงสีที่ร้อยเอ็ด ให้ 18.2');
+    expect(buttons(h.last().messages[1]!).map((b) => b.label)).toEqual(['ยืนยันคำขอซื้อ', 'แก้ไข']);
+    await h.tap(postbackData('buyer_confirm'));
+    expect(h.store.buyerRequests[0]).toMatchObject({ quantityKg: 10_000, offerPerKg: 18.2 });
+  });
+
+  it('เกินโควตาแชตรายวัน หรือ AI ล้ม → กลับไปตอบแบบกฎ (ไม่เงียบ)', async () => {
+    const h = withChat([() => [{ text: 'x' }]], { limit: 0 });
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_auto'));
+    await h.say('ข้าวหอมมะลิ 12 ตัน');
+    expect(asText(h.last().messages[0]!)).toContain('ราคาสุทธิขั้นต่ำ');
+    expect(h.seen).toHaveLength(0);
+
+    const f = withChat([() => { throw new Error('Bedrock down'); }]);
+    await f.tap(postbackData('role_farmer'));
+    await f.tap(postbackData('group_auto'));
+    await f.say('สวัสดีจ้า วันนี้ราคาเป็นไง');
+    expect(f.last().messages.length).toBeGreaterThan(0);
+  });
+
+  it('การ์ดผลเจรจามี "น้องมะระต่อรองอย่างไร" (รอบ หลักฐาน ราคา) และปุ่มดูการเจรจาทั้งหมด', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_auto'));
+    await h.say(ROOF);
+    const raw = JSON.stringify({ destination: 'U', events: [{ type: 'postback', webhookEventId: 'x-1', mode: 'active', replyToken: 'r', source: { type: 'user', userId: 'U-farmer' }, postback: { data: postbackData('confirm') } }] });
+    await h.ctx.line!.handleWebhook(raw, signLineBody(raw, SECRET), 'https://example.test/');
+    const card = h.sent.find((m) => m.kind === 'push' && m.to === 'U-farmer')!.messages[0]!;
+    const json = asText(card);
+    expect(json).toContain('น้องมะระต่อรองอย่างไร');
+    expect(json).toMatch(/รอบ \d+ · /);
+    expect(json).toContain('https://example.test/?deal=deal-1');
+    expect(json).toContain('ทำไมได้ราคานี้');
+  });
+});

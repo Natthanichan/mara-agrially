@@ -72,6 +72,8 @@ export interface LineSession {
   draft?: ListingDraft;
   buyerDraft?: BuyerDraft;
   lastDealId?: string;
+  /** ประวัติแชตล่าสุดกับน้องมะระ (ไม่เกิน 6 ข้อความ) */
+  chat?: { r: 'u' | 'a'; t: string }[];
   updatedAt: string;
 }
 
@@ -98,6 +100,8 @@ export interface DealRecord {
   listingOverrides?: Listing[];
   /** รอบการเจรจาใหม่ต่อจากดีลเดิม (0 = ดีลแรก) */
   round?: number;
+  /** URL หน้าเว็บของระบบ (จาก webhook) ไว้ทำปุ่ม "ดูการเจรจาทั้งหมด" ใน LINE */
+  lineBaseUrl?: string;
 }
 
 export interface DealStore {

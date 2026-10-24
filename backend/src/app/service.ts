@@ -26,11 +26,15 @@ export interface AppContext {
   newId?: () => string;
   /** ตัวเชื่อม LINE (ไม่บังคับ) — ถ้าไม่ตั้ง ระบบทำงานเฉพาะหน้าเว็บ/API */
   line?: LineHooks;
+  /** LLM สำหรับแชตใน LINE (ไม่บังคับ) — ไม่ตั้ง = ใช้การอ่านข้อความแบบกฎเหมือนเดิม */
+  chatLlm?: () => LlmClient | undefined;
+  /** จำนวนข้อความแชตที่เรียก AI ได้ต่อวัน (กันค่าใช้จ่าย) */
+  chatDailyLimit?: number;
 }
 
 export interface LineHooks {
   /** ประมวลผล webhook ที่ผ่านการตรวจลายเซ็นแล้วเท่านั้น */
-  handleWebhook(rawBody: string, signature: string | undefined): Promise<{ status: number; error?: string }>;
+  handleWebhook(rawBody: string, signature: string | undefined, baseUrl?: string): Promise<{ status: number; error?: string }>;
   /** worker เรียกเมื่อดีลที่เริ่มจาก LINE เจรจาเสร็จ (ส่งผลหาเกษตรกรครั้งเดียว) */
   notifyDealReady(dealId: string): Promise<void>;
 }
@@ -76,6 +80,7 @@ export interface LineStart {
   draft: ListingDraft;
   /** ต่อรองใหม่ครั้งที่เท่าไร (0 = ครั้งแรก) */
   round?: number;
+  baseUrl?: string;
 }
 
 export const MAX_LINE_ROUNDS = 3;
@@ -113,7 +118,7 @@ export async function startDeal(ctx: AppContext, body: { crop?: unknown }, opts:
     updatedAt: at,
     marketDate: bangkokDate(now),
     approvals: {},
-    ...(opts.line && override && lineFarmerId ? { lineUserId: opts.line.userId, lineFarmerId, listingOverrides: [override], round: opts.line.round ?? 0 } : {}),
+    ...(opts.line && override && lineFarmerId ? { lineUserId: opts.line.userId, lineFarmerId, listingOverrides: [override], round: opts.line.round ?? 0, ...(opts.line.baseUrl ? { lineBaseUrl: opts.line.baseUrl } : {}) } : {}),
   });
   await ctx.invokeWorker(id);
   return { id };
@@ -354,7 +359,7 @@ export async function approveSimulatedMembers(ctx: AppContext, id: string, excep
 }
 
 /** เกษตรกรสั่งต่อรองใหม่ — ยกเลิกดีลเดิม (ถ้ายังรออนุมัติ) แล้วเริ่มดีลใหม่ด้วยผลผลิตเดิม */
-export async function renegotiate(ctx: AppContext, id: string, lineUserId: string): Promise<{ id: string }> {
+export async function renegotiate(ctx: AppContext, id: string, lineUserId: string, baseUrl?: string): Promise<{ id: string }> {
   const deal = await ctx.store.getDeal(id);
   if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
   const mine = deal.listingOverrides?.[0];
@@ -364,7 +369,7 @@ export async function renegotiate(ctx: AppContext, id: string, lineUserId: strin
   if (next > MAX_LINE_ROUNDS) throw new AppError(409, `ต่อรองใหม่ได้ไม่เกิน ${MAX_LINE_ROUNDS} ครั้งต่อรายการ`);
 
   const draft: ListingDraft = { crop: deal.crop, quantityKg: mine.quantityKg, grade: mine.grade, floorPricePerKg: mine.floorPricePerKg };
-  const created = await startDeal(ctx, {}, { line: { userId: lineUserId, draft, round: next } });
+  const created = await startDeal(ctx, {}, { line: { userId: lineUserId, draft, round: next, ...((baseUrl ?? deal.lineBaseUrl) ? { baseUrl: baseUrl ?? deal.lineBaseUrl } : {}) } });
   if (deal.status === 'pending_approval') {
     const now = (ctx.now ?? (() => new Date()))();
     if (await ctx.store.updateDeal(id, { status: nextDealStatus('pending_approval', 'cancelled'), updatedAt: now.toISOString() }, 'pending_approval')) {

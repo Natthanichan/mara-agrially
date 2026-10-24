@@ -40,7 +40,8 @@ export async function handleHttp(ctx: AppContext, e: APIGatewayProxyEventV2): Pr
       const raw = e.body ? (e.isBase64Encoded ? Buffer.from(e.body, 'base64').toString('utf8') : e.body) : '';
       if (raw.length > 100_000) return json(413, { error: 'ข้อมูลใหญ่เกินไป' });
       const sig = e.headers?.['x-line-signature'] ?? e.headers?.['X-Line-Signature'];
-      const r = await ctx.line.handleWebhook(raw, sig);
+      const host = e.requestContext.domainName;
+      const r = await ctx.line.handleWebhook(raw, sig, process.env.APP_URL || (host ? `https://${host}/` : undefined));
       return json(r.status, r.status === 200 ? { ok: true } : { error: r.error ?? 'ผิดพลาด' });
     }
     return json(404, { error: 'ไม่พบหน้า/คำสั่งนี้' });

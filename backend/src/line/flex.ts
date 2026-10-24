@@ -5,6 +5,7 @@ import type { FarmerOffer } from '../app/service.js';
 import type { Crop } from '../core/types.js';
 import type { BuyerDraft, BuyerRequest, ListingDraft } from '../store/types.js';
 import type { LineMessage } from './client.js';
+import { DECISION_TH, type RoundSummary } from './rounds.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
@@ -89,8 +90,34 @@ export function confirmMessage(d: ListingDraft, gradeAssumed: boolean): LineMess
   );
 }
 
-export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string): LineMessage {
+export interface OfferExtras {
+  /** รอบการเจรจาทั้งหมดของดีลนี้ */
+  rounds?: RoundSummary[];
+  chosenBuyerId?: string;
+  /** จำนวนครั้งที่ระบบป้องกันบล็อก */
+  blocks?: number;
+  /** ลิงก์หน้าเว็บของดีลนี้ */
+  detailsUrl?: string;
+}
+
+/** บรรทัดสรุปว่าน้องมะระต่อรองอย่างไร (ผู้ซื้อที่เลือกก่อน ไม่เกิน 4 รอบ) */
+export function roundLines(x: OfferExtras): string[] {
+  const rounds = x.rounds ?? [];
+  if (!rounds.length) return [];
+  const chosen = rounds.filter((r) => r.buyerId === x.chosenBuyerId);
+  const lines = chosen.slice(-4).map((r) => {
+    const why = r.evidence.length ? `อ้าง${r.evidence.join(' + ')}` : r.strategy;
+    const reply = r.buyerPerKg !== undefined ? ` → ${DECISION_TH[r.buyerDecision ?? ''] ?? ''} ${baht(r.buyerPerKg)}` : '';
+    return `รอบ ${r.round} · ${why} · ขอ ${baht(r.askPerKg)}${reply}`;
+  });
+  const buyers = new Set(rounds.map((r) => r.buyerId)).size;
+  lines.push(`เจรจา ${buyers} ราย รวม ${rounds.length} รอบ${x.blocks ? ` · ระบบป้องกันบล็อก ${x.blocks} ครั้ง` : ''}`);
+  return lines;
+}
+
+export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string, x: OfferExtras = {}): LineMessage {
   const m = o.mine;
+  const how = roundLines(x);
   const body: LineMessage[] = [
     row('ผู้ซื้อ', o.buyerName, true),
     row('ราคาที่ตกลงเบื้องต้น', `${baht(o.pricePerKg)} บาท/กก.`),
@@ -102,7 +129,15 @@ export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string)
     row('ขั้นต่ำของคุณ', `${baht(m.floorPerKg)} บาท/กก. ${m.passesFloor ? '✓ ผ่าน' : '✗ ไม่ผ่าน'}`),
     ...(o.marketMedianPerKg !== undefined ? [row('ราคาตลาดอ้างอิง (มัธยฐาน)', `${baht(o.marketMedianPerKg)} บาท/กก.`)] : []),
     { type: 'text', text: `ทั้งกลุ่ม ${o.group.memberCount} คน ${qty(o.group.totalKg)} สุทธิเฉลี่ย ${baht(o.group.netPerKgAvg)} บาท/กก.`, size: 'xs', color: '#666666', wrap: true },
+    ...(how.length
+      ? [
+          { type: 'separator' },
+          { type: 'text', text: 'น้องมะระต่อรองอย่างไร', weight: 'bold', size: 'sm', color: '#1B5E20' },
+          ...how.map((t) => ({ type: 'text', text: t, size: 'xs', color: '#333333', wrap: true })),
+        ]
+      : []),
     { type: 'text', text: memberNote, size: 'xs', color: '#666666', wrap: true },
+    { type: 'text', text: 'พิมพ์ถามน้องมะระได้เลยค่ะ เช่น “ทำไมได้ราคานี้” หรือ “ผู้ซื้อรายอื่นให้เท่าไร”', size: 'xs', color: '#1B5E20', wrap: true },
   ];
   return bubble(
     'น้องมะระเจรจาให้แล้ว รอคุณอนุมัติ',
@@ -111,6 +146,7 @@ export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string)
       button('อนุมัติ', postbackData('approve', dealId), 'อนุมัติดีลนี้', 'primary', '#2E7D32'),
       button('ไม่เอา', postbackData('reject', dealId), 'ไม่เอาดีลนี้', 'secondary'),
       button('ต่อรองใหม่', postbackData('renegotiate', dealId), 'ต่อรองใหม่', 'secondary'),
+      ...(x.detailsUrl ? [{ type: 'button', style: 'link', height: 'sm', action: { type: 'uri', label: 'ดูการเจรจาทั้งหมด', uri: x.detailsUrl } }] : []),
     ],
     `ผลเจรจา: ${o.buyerName} คุณได้สุทธิ ${baht(m.netPerKg)} บาท/กก. รวม ${baht(m.netTotal)} บาท — กดอนุมัติ ไม่เอา หรือต่อรองใหม่`,
   );

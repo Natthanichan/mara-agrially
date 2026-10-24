@@ -41,6 +41,7 @@ Globals:
         BEDROCK_MODEL_ID: !Ref BedrockModelId
         DAILY_NEGOTIATION_LIMIT: !Ref DailyNegotiationLimit
         AGENT_MAX_ROUNDS: '5'
+        CHAT_DAILY_LIMIT: '300'
         LINE_SECRET_PARAM: !Ref LineChannelSecretParam
         LINE_TOKEN_PARAM: !Ref LineChannelAccessTokenParam
         NABC_TIMEOUT_MS: '5000'
@@ -90,7 +91,7 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-api
       CodeUri: .
       Handler: api.handler
-      Timeout: 15
+      Timeout: 25   # แชต LINE เรียก Nova (ตอบใหม่ได้ 1 ครั้ง) — HTTP API รอได้ไม่เกิน 30 วิ
       LoggingConfig:
         LogGroup: !Ref ApiLogs
       Environment:
@@ -99,6 +100,13 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref Table }
         - LambdaInvokePolicy: { FunctionName: !Ref WorkerFunction }
+        - Statement:
+            - Sid: ChatWithAmazonNovaOnly
+              Effect: Allow
+              Action: [bedrock:InvokeModel]
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/amazon.nova*
+                - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova*
         - Statement:
             - Sid: ReadLineSecrets
               Effect: Allow
