@@ -186,6 +186,8 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     await post([{ type: 'follow' }]);
     expect(buttons(last().messages[0]!).map((b) => b.label)).toEqual(['ฉันเป็นเกษตรกร', 'ฉันเป็นผู้ซื้อ']);
     await tap(postbackData('role_farmer'));
+    expect(buttons(last().messages[0]!).map((b) => b.label)).toEqual(['มีผลผลิตพร้อมขาย', 'กำลังวางแผนปลูก']);
+    await tap(postbackData('farm_sell'));
     expect(buttons(last().messages[0]!).map((b) => b.label)).toEqual(['มีรหัสกลุ่ม', 'สร้างกลุ่มใหม่', 'ให้น้องมะระหากลุ่มให้']);
     await tap(postbackData('group_auto'));
     expect(asText(last().messages[0]!)).toContain('ขั้นต่ำ');
@@ -542,6 +544,69 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
     expect(all.length).toBeGreaterThan(2000);
     expect(all).not.toMatch(/ครับ|ผม(?!ลิต|ลไม้)/);
     expect(all).toContain('ค่ะ');
+  });
+});
+
+describe('Farm Profile: วางแผนปลูก → แนะนำพืช → ถึงรอบขายใช้ข้อมูลเดิม', () => {
+  it('ยังไม่แน่ใจว่าจะปลูกอะไร → ถาม ไร่/ดิน/พืชรอบก่อน/จังหวัด → แนะนำพืช → เลือกพืช → เดือนเก็บเกี่ยว + ราคาขั้นต่ำ', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('farm_plan'));
+    expect(buttons(h.last().messages[0]!).map((b) => b.label)).toEqual(['ข้าว', 'ยาง', 'ข้าวโพด', 'มะระ', 'มันสำปะหลัง', 'ยังไม่แน่ใจ ขอคำแนะนำ']);
+    await h.tap(postbackData('plan_advise'));
+    await h.say('15 ไร่');
+    await h.say('ดินทราย');
+    await h.say('มันสำปะหลัง');
+    await h.say('ขอนแก่น');
+    const card = h.last().messages.map(asText).join(' ');
+    expect(card).toContain('โปรไฟล์ฟาร์มของคุณ');
+    expect(card).toContain('น้องมะระแนะนำ');
+    expect(card).toContain('15 ไร่');
+    expect(card).toContain('ปลูกซ้ำติดกันทำให้ดินเสื่อม'); // ปลูกมันซ้ำ → เตือนให้สลับพืช
+    const p = (await h.store.getLineSession('U-farmer'))!.farmProfile!;
+    expect(p).toMatchObject({ rai: 15, soil: 'sand', previousCrop: 'มันสำปะหลังสด', province: 'ขอนแก่น', deliveries: 0 });
+    expect(p.crop).toBeUndefined();
+
+    // เลือกพืชจากการ์ดคำแนะนำ → ถามแค่เดือนเก็บเกี่ยวและราคาขั้นต่ำ
+    await h.tap(postbackData('plan_crop', undefined, 'rice_hommali'));
+    expect(asText(h.last().messages[0]!)).toContain('เก็บเกี่ยวเดือนไหน');
+    await h.say('ยังไม่ทราบ');
+    await h.say('16.5');
+    const p2 = (await h.store.getLineSession('U-farmer'))!.farmProfile!;
+    expect(p2).toMatchObject({ crop: 'rice_hommali', rai: 15, floorPerKg: 16.5 });
+    expect(h.last().messages.map(asText).join(' ')).toContain('5.7 ตัน'); // 15 ไร่ × 380 กก.
+  });
+
+  it('ถึงรอบขาย: กดขายจากโปรไฟล์ → ตอบแค่ปริมาณจริง → การ์ดยืนยันใช้พืชและราคาขั้นต่ำจากโปรไฟล์ → อนุมัติแล้วนับประวัติส่งมอบ', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('farm_plan'));
+    await h.tap(postbackData('plan_crop', undefined, 'rice_hommali'));
+    await h.say('30 ไร่');
+    await h.say('ดินเหนียว');
+    await h.say('ข้าว');
+    await h.say('ร้อยเอ็ด');
+    await h.say('ข้าม');
+    await h.say('16.8');
+    await h.tap(postbackData('farm_sell_profile'));
+    expect(asText(h.last().messages[0]!)).toContain('11.4 ตัน'); // 30 ไร่ × 380 กก. เป็นตัวเลือกให้กด
+    await h.say('12 ตัน');
+    const confirm = h.last().messages.at(-1)!;
+    expect(buttons(confirm).map((b) => b.label)).toEqual(['ยืนยัน เริ่มเจรจา', 'แก้ไข']);
+    expect((await h.store.getLineSession('U-farmer'))!.draft).toMatchObject({ crop: 'rice_hommali', quantityKg: 12_000, floorPricePerKg: 16.8 });
+    await h.tap(postbackData('confirm'));
+    const offer = h.sent.filter((x) => x.kind === 'push').at(-1)!.messages[0]!;
+    await h.tap(buttons(offer)[0]!.data);
+    expect((await h.store.getLineSession('U-farmer'))!.farmProfile!.deliveries).toBe(1);
+  });
+
+  it('พิมพ์ "โปรไฟล์ฟาร์ม" ได้ทุกเมื่อ · ยกเลิกระหว่างถามได้', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.say('โปรไฟล์ฟาร์ม');
+    expect(asText(h.last().messages[0]!)).toContain('จะปลูกอะไร');
+    await h.say('ยกเลิก');
+    expect((await h.store.getLineSession('U-farmer'))!.profileDraft).toBeUndefined();
   });
 });
 

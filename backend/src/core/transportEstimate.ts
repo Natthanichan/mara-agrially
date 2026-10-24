@@ -20,6 +20,7 @@ const REGIONS: Record<Region, string[]> = {
 
 export const PROVINCES: string[] = Object.values(REGIONS).flat();
 const REGION_OF = new Map(Object.entries(REGIONS).flatMap(([r, ps]) => ps.map((p) => [p, r as Region])));
+export const regionOf = (province: string): Region | undefined => REGION_OF.get(province);
 
 const ALIASES: [RegExp, string][] = [
   [/กทม|กรุงเทพ/, 'กรุงเทพมหานคร'],

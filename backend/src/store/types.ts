@@ -64,7 +64,7 @@ export interface FarmerGroup {
 export interface LineSession {
   role?: LineRole;
   /** กำลังรอคำตอบอะไรจากเกษตรกร */
-  awaiting?: 'group_code' | 'group_name';
+  awaiting?: 'group_code' | 'group_name' | 'profile_qty' | 'profile_floor';
   /** mock = รหัสกลุ่มจำลอง, joined/created = กลุ่มที่ผู้ใช้สร้าง, auto = ให้น้องมะระจับกลุ่มให้ */
   groupMode?: 'mock' | 'joined' | 'created' | 'auto';
   groupCode?: string;
@@ -74,6 +74,11 @@ export interface LineSession {
   lastDealId?: string;
   /** ผู้ซื้อกำลังเจรจาราคากับกลุ่มเกษตรกร (มีราคาภายในที่ห้ามส่งออก — อยู่ฝั่งเซิร์ฟเวอร์เท่านั้น) */
   buyerNeg?: import('../line/buyerNegotiation.js').BuyerNegState;
+  /** โปรไฟล์ฟาร์ม (เก็บตั้งแต่ช่วงวางแผนปลูก) และร่างที่กำลังถามทีละข้อ */
+  farmProfile?: import('../core/farmProfile.js').FarmProfile;
+  profileDraft?: Partial<import('../core/farmProfile.js').FarmProfile> & { step: 'crop' | 'rai' | 'soil' | 'prev' | 'province' | 'harvest' | 'floor' };
+  /** ขายจากโปรไฟล์: ปริมาณจริงที่ตอบแล้ว (รอราคาขั้นต่ำ) */
+  profileSaleKg?: number;
   /** ประวัติแชตล่าสุดกับน้องมะระ (ไม่เกิน 6 ข้อความ) */
   chat?: { r: 'u' | 'a'; t: string }[];
   updatedAt: string;

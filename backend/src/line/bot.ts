@@ -66,13 +66,24 @@ import {
   unitChoiceMessage,
   cropGuessMessage,
   withInterestButton,
+  farmerStartMessage,
+  planCropMessage,
+  planAskRai,
+  planAskSoil,
+  planAskPrevious,
+  planAskProvince,
+  planAskHarvest,
+  planAskFloor,
+  farmProfileMessage,
+  askActualQuantity,
 } from './flex.js';
+import { expectedYieldKg, monthTh, parseRai, recommendCrops, upcomingMonths, type FarmProfile, type Soil } from '../core/farmProfile.js';
 import { negotiationRounds } from './rounds.js';
-import { estimateTransport } from '../core/transportEstimate.js';
+import { estimateTransport, findProvince } from '../core/transportEstimate.js';
 import { MAX_HISTORY, smartChat, type ChatAction } from './chat.js';
 import { apply, decide, extractOffer, groupTerms, MAX_BUYER_ROUNDS, openingAsk, type BuyerNegDecision, type BuyerNegState } from './buyerNegotiation.js';
 import type { ListingDraft } from '../store/types.js';
-import { cropsMentioned } from './cropMatch.js';
+import { cropsMentioned, guessCrop } from './cropMatch.js';
 import { bareNumber, parseBuyerCrop, parseBuyerLocation, parseBuyerPrice, parseBuyerQuantity, parseListing } from './parse.js';
 import { verifyLineSignature } from './signature.js';
 
@@ -89,6 +100,8 @@ interface LineEvent {
 const GREETING = /^(เมนู|วิธีใช้|ช่วยเหลือ|help|สวัสดี|สวัสดีครับ|สวัสดีค่ะ|หวัดดี|hi|hello)$/i;
 const STATUS = /^(สถานะ|status)$/i;
 const CANCEL = /^(ยกเลิก|cancel)$/i;
+const PROFILE = /^(โปรไฟล์ฟาร์ม|โปรไฟล์|ข้อมูลแปลง|วางแผนปลูก|ฟาร์มของฉัน)$/;
+const SKIP = /^(ข้าม|ไม่ตั้ง|ไม่ทราบ|ยังไม่ทราบ|ไม่รู้|-)$/;
 const MY_REQUESTS = /^(คำขอของฉัน|คำขอซื้อ|รายการของฉัน)$/;
 const NEW_REQUEST = /^(ซื้อ|ขอซื้อ|ลงทะเบียน|คำขอใหม่|ลงทะเบียนคำขอ)$/;
 const INTEREST = /^(สนใจ|เจรจา|ต่อรอง|ขอเจรจา|ขอต่อรอง)(ครับ|ค่ะ|คะ|จ้า|นะ)?\s*$/;
@@ -115,6 +128,12 @@ function groupsFor(crop: Crop): GroupForBuyer[] {
   return groupListings(listings, farmers)
     .filter((g) => g.crop === crop)
     .map((g) => ({ crop: g.crop, cropLabel: CROP_LABEL_TH[g.crop], grade: g.grade, province: g.province, members: g.members.length, totalKg: g.members.reduce((n, m) => n + m.quantityKg, 0), window: g.deliveryWindow }));
+}
+
+/** ชื่อพืชรอบก่อน → รหัสพืช (ถ้าเป็นพืชที่ระบบรู้จัก) */
+function previousCropCode(name: string): Crop | undefined {
+  const g = guessCrop(name);
+  return g.kind === 'exact' || g.kind === 'fuzzy' ? g.crop : undefined;
 }
 
 /** พืชที่ผู้ซื้อกำลังคุยอยู่: กำลังเจรจา > กำลังกรอกคำขอ > คำขอล่าสุด */
@@ -213,11 +232,19 @@ export class LineBot implements LineHooks {
       return reply([roleMessage()]);
     }
     if (CANCEL.test(t)) {
-      await this.save(userId, { draft: undefined, buyerDraft: undefined, awaiting: undefined, buyerNeg: undefined });
+      await this.save(userId, { draft: undefined, buyerDraft: undefined, awaiting: undefined, buyerNeg: undefined, profileDraft: undefined, profileSaleKg: undefined });
       return reply([text('ยกเลิกแล้วค่ะ พิมพ์ “เมนู” เพื่อเริ่มใหม่ได้เลย')]);
     }
     const session = await store.getLineSession(userId);
     if (session?.role === 'buyer') return this.onBuyerText(userId, t, session, reply);
+    if (session?.profileDraft) return this.onProfileText(userId, t, session, reply);
+    if (session?.awaiting === 'profile_qty' || session?.awaiting === 'profile_floor') return this.onProfileSale(userId, t, session, reply);
+    if (PROFILE.test(t)) {
+      await this.save(userId, { role: 'farmer' });
+      if (session?.farmProfile) return reply([this.profileCard(session.farmProfile)]);
+      await this.save(userId, { role: 'farmer', profileDraft: { step: 'crop' } });
+      return reply([planCropMessage()]);
+    }
     if (session?.awaiting === 'group_code') return this.onGroupCode(userId, t, reply);
     if (session?.awaiting === 'group_name') return this.onGroupName(userId, t, reply);
 
@@ -236,6 +263,100 @@ export class LineBot implements LineHooks {
     }
     // ยังไม่ได้เลือกบทบาท และข้อความไม่เกี่ยวกับผลผลิตเลย → ให้เลือกบทบาทก่อน
     return reply([r.problems.length >= 3 ? (session?.role ? helpMessage() : roleMessage()) : problemsMessage(r.problems)]);
+  }
+
+  private nowDate() {
+    return (this.getCtx().now ?? (() => new Date()))();
+  }
+
+  private profileCard(p: FarmProfile) {
+    return farmProfileMessage(p, recommendCrops(p, p.previousCrop ? previousCropCode(p.previousCrop) : undefined).filter((a) => a.crop !== p.crop));
+  }
+
+  /** วางแผนปลูก: ถามทีละข้อ (พืช → ไร่ → ดิน → พืชรอบก่อน → จังหวัด → เดือนเก็บเกี่ยว → ราคาขั้นต่ำ) */
+  private async onProfileText(userId: string, t: string, session: LineSession, reply: (m: LineMessage[]) => Promise<void>) {
+    const d = session.profileDraft!;
+    const next = async (patch: Partial<NonNullable<LineSession['profileDraft']>>, msg: LineMessage[]) => {
+      await this.save(userId, { profileDraft: { ...d, ...patch } as NonNullable<LineSession['profileDraft']> });
+      return reply(msg);
+    };
+    switch (d.step) {
+      case 'crop': {
+        if (/ไม่แน่ใจ|แนะนำ|ไม่รู้/.test(t)) return next({ step: 'rai' }, [planAskRai()]);
+        const g = guessCrop(t);
+        if (g.kind === 'exact' || g.kind === 'fuzzy') return next({ crop: g.crop, step: 'rai' }, [text(`วางแผนปลูก${CROP_LABEL_TH[g.crop]} รับทราบค่ะ`), planAskRai()]);
+        return reply([text(g.kind === 'unsupported' ? `${g.name}ยังไม่มีในระบบค่ะ เลือกพืชด้านล่าง หรือกด “ยังไม่แน่ใจ ขอคำแนะนำ”` : 'เลือกพืชด้านล่างได้เลยค่ะ'), planCropMessage()]);
+      }
+      case 'rai': {
+        const rai = parseRai(t);
+        if (rai === undefined) return reply([text('ขอเป็นตัวเลขจำนวนไร่นะคะ เช่น “10 ไร่”'), planAskRai()]);
+        return next({ rai, step: 'soil' }, [planAskSoil()]);
+      }
+      case 'soil': {
+        const soil: Soil | undefined = /ร่วน/.test(t) ? 'loam' : /เหนียว/.test(t) ? 'clay' : /ทราย/.test(t) ? 'sand' : /ไม่แน่ใจ|ไม่รู้|ไม่ทราบ/.test(t) ? 'unknown' : undefined;
+        if (!soil) return reply([planAskSoil()]);
+        return next({ soil, step: 'prev' }, [planAskPrevious()]);
+      }
+      case 'prev': {
+        const none = /ไม่ได้ปลูก|ไม่มี|ไม่เคย/.test(t);
+        const g = guessCrop(t);
+        const name = none ? undefined : g.kind === 'exact' || g.kind === 'fuzzy' ? CROP_LABEL_TH[g.crop] : g.kind === 'unsupported' ? g.name : t.slice(0, 30);
+        return next({ ...(name ? { previousCrop: name } : {}), step: 'province' }, [planAskProvince()]);
+      }
+      case 'province': {
+        const province = SKIP.test(t) ? undefined : findProvince(t);
+        if (!province && !SKIP.test(t)) return reply([text('หนูยังหาชื่อจังหวัดไม่เจอค่ะ ลองพิมพ์ชื่อจังหวัดเต็ม ๆ เช่น “ร้อยเอ็ด” หรือกด “ข้าม”'), planAskProvince()]);
+        const patch = { ...(province ? { province } : {}) };
+        if (!d.crop) return this.finishProfile(userId, session, { ...d, ...patch }, reply); // ยังไม่เลือกพืช → แนะนำเลย
+        return next({ ...patch, step: 'harvest' }, [planAskHarvest(upcomingMonths(this.nowDate(), 4))]);
+      }
+      case 'harvest': {
+        const months = upcomingMonths(this.nowDate(), 12);
+        const ym = months.find((m) => t.includes(monthTh(m)) || t.includes(monthTh(m).split(' ')[0]!));
+        if (!ym && !SKIP.test(t)) return reply([planAskHarvest(upcomingMonths(this.nowDate(), 4))]);
+        return next({ ...(ym ? { harvestMonth: ym } : {}), step: 'floor' }, [planAskFloor(CROP_LABEL_TH[d.crop!])]);
+      }
+      case 'floor': {
+        if (SKIP.test(t)) return this.finishProfile(userId, session, { ...d, floorPerKg: undefined }, reply);
+        const r = parseBuyerPrice(t);
+        if (!r.ok) return reply([text(r.problem), planAskFloor(CROP_LABEL_TH[d.crop!])]);
+        return this.finishProfile(userId, session, { ...d, floorPerKg: r.value }, reply);
+      }
+    }
+  }
+
+  private async finishProfile(userId: string, session: LineSession, d: NonNullable<LineSession['profileDraft']>, reply: (m: LineMessage[]) => Promise<void>) {
+    const { step: _step, ...rest } = d;
+    const p: FarmProfile = { soil: 'unknown', rai: 1, ...rest, deliveries: session.farmProfile?.deliveries ?? 0, updatedAt: this.now() } as FarmProfile;
+    if (p.floorPerKg === undefined) delete p.floorPerKg;
+    await this.save(userId, { farmProfile: p, profileDraft: undefined });
+    return reply([text('บันทึกโปรไฟล์ฟาร์มแล้วค่ะ ✓ พอถึงรอบขาย กด “ถึงรอบขายแล้ว” หรือพิมพ์ “โปรไฟล์ฟาร์ม” ได้เลย'), this.profileCard(p)]);
+  }
+
+  /** ขายจากโปรไฟล์: ถามแค่ปริมาณจริง (และราคาขั้นต่ำถ้ายังไม่ได้ตั้ง) แล้วไปการ์ดยืนยันเดิม */
+  private async onProfileSale(userId: string, t: string, session: LineSession, reply: (m: LineMessage[]) => Promise<void>) {
+    const p = session.farmProfile;
+    if (!p?.crop) {
+      await this.save(userId, { awaiting: undefined });
+      return reply([planCropMessage()]);
+    }
+    if (session.awaiting === 'profile_qty') {
+      const q = parseBuyerQuantity(t);
+      if (!q.ok) {
+        const n = bareNumber(t);
+        return reply([n !== undefined ? unitChoiceMessage(q.problem, n) : text(q.problem)]);
+      }
+      if (p.floorPerKg === undefined) {
+        await this.save(userId, { awaiting: 'profile_floor', profileSaleKg: q.value });
+        return reply([planAskFloor(CROP_LABEL_TH[p.crop])]);
+      }
+      await this.save(userId, { awaiting: undefined, profileSaleKg: undefined });
+      return this.acceptListing(userId, session, { crop: p.crop, quantityKg: q.value, grade: 'A', floorPricePerKg: p.floorPerKg }, true, reply, 'หนูดึงพืชและราคาขั้นต่ำจากโปรไฟล์ฟาร์มให้แล้วค่ะ ตรวจแล้วกดยืนยันได้เลย');
+    }
+    const r = parseBuyerPrice(t);
+    if (!r.ok || session.profileSaleKg === undefined) return reply([text(r.ok ? 'ขอปริมาณใหม่อีกครั้งนะคะ' : r.problem)]);
+    await this.save(userId, { awaiting: undefined, profileSaleKg: undefined, farmProfile: { ...p, floorPerKg: r.value, updatedAt: this.now() } });
+    return this.acceptListing(userId, session, { crop: p.crop, quantityKg: session.profileSaleKg, grade: 'A', floorPricePerKg: r.value }, true, reply, 'หนูดึงข้อมูลจากโปรไฟล์ฟาร์มให้แล้วค่ะ ตรวจแล้วกดยืนยันได้เลย');
   }
 
   private async acceptListing(userId: string, session: LineSession | undefined, draft: ListingDraft, gradeAssumed: boolean, reply: (m: LineMessage[]) => Promise<void>, lead?: string) {
@@ -278,6 +399,10 @@ export class LineBot implements LineHooks {
     };
     if (session.groupMode === 'mock') c.group = { code: session.groupCode, ...mockGroupInfo() };
     else if (session.groupMode) c.group = { mode: session.groupMode, ...(session.groupCode ? { code: session.groupCode } : {}), ...(session.groupName ? { name: session.groupName } : {}) };
+    if (session.farmProfile) {
+      const fp = session.farmProfile;
+      c.farmProfile = { crop: fp.crop ? CROP_LABEL_TH[fp.crop] : 'ยังไม่เลือก', rai: fp.rai, soil: fp.soil, previousCrop: fp.previousCrop, province: fp.province, harvestMonth: fp.harvestMonth, expectedKg: expectedYieldKg(fp), myFloorPerKg: fp.floorPerKg, deliveries: fp.deliveries };
+    }
     if (session.draft) c.pendingListing = { crop: CROP_LABEL_TH[session.draft.crop], quantityKg: session.draft.quantityKg, grade: session.draft.grade, myFloorPerKg: session.draft.floorPricePerKg, note: 'รอเกษตรกรกดยืนยัน' };
     const deal = session.lastDealId ? await ctx.store.getDeal(session.lastDealId) : undefined;
     if (deal) {
@@ -607,8 +732,39 @@ export class LineBot implements LineHooks {
     const { store } = ctx;
 
     if (pb.act === 'role_farmer') {
-      await this.save(userId, { role: 'farmer', buyerDraft: undefined, awaiting: undefined });
+      const s = await store.getLineSession(userId);
+      await this.save(userId, { role: 'farmer', buyerDraft: undefined, awaiting: undefined, profileDraft: undefined });
+      return reply([farmerStartMessage(Boolean(s?.farmProfile))]);
+    }
+    if (pb.act === 'farm_sell') {
+      await this.save(userId, { role: 'farmer', profileDraft: undefined });
       return reply([groupChoiceMessage()]);
+    }
+    if (pb.act === 'farm_plan') {
+      await this.save(userId, { role: 'farmer', profileDraft: { step: 'crop' }, awaiting: undefined });
+      return reply([planCropMessage()]);
+    }
+    if (pb.act === 'farm_profile') {
+      const s = await store.getLineSession(userId);
+      return reply([s?.farmProfile ? this.profileCard(s.farmProfile) : planCropMessage()]);
+    }
+    if (pb.act === 'plan_crop' || pb.act === 'plan_advise') {
+      const s = await store.getLineSession(userId);
+      const crop = pb.act === 'plan_crop' ? pb.crop : undefined;
+      // เลือกพืชจากการ์ดคำแนะนำ (มีโปรไฟล์แล้ว) → ถามต่อแค่เดือนเก็บเกี่ยวและราคาขั้นต่ำ
+      if (crop && s?.farmProfile && !s.profileDraft) {
+        await this.save(userId, { role: 'farmer', profileDraft: { ...s.farmProfile, crop, step: 'harvest' } });
+        return reply([planAskHarvest(upcomingMonths(this.nowDate(), 4))]);
+      }
+      await this.save(userId, { role: 'farmer', profileDraft: { ...(s?.profileDraft ?? {}), ...(crop ? { crop } : {}), step: 'rai' } });
+      return reply([...(crop ? [text(`วางแผนปลูก${CROP_LABEL_TH[crop]} รับทราบค่ะ`)] : [text('ได้ค่ะ ตอบอีก 4 ข้อ หนูจะแนะนำพืชที่เหมาะกับแปลงให้นะคะ')]), planAskRai()]);
+    }
+    if (pb.act === 'farm_sell_profile') {
+      const s = await store.getLineSession(userId);
+      const p = s?.farmProfile;
+      if (!p?.crop) return reply([text('ยังไม่มีพืชในโปรไฟล์ค่ะ กดเลือกพืชในการ์ดโปรไฟล์ก่อนนะคะ'), planCropMessage()]);
+      await this.save(userId, { role: 'farmer', awaiting: 'profile_qty', profileSaleKg: undefined, groupMode: s?.groupMode ?? 'auto' });
+      return reply([askActualQuantity(CROP_LABEL_TH[p.crop], expectedYieldKg(p))]);
     }
     if (pb.act === 'group_join') {
       await this.save(userId, { role: 'farmer', awaiting: 'group_code' });
@@ -717,6 +873,8 @@ export class LineBot implements LineHooks {
 
     if (pb.act === 'approve') {
       if (r.status === 'agreed') {
+        const s = await store.getLineSession(userId);
+        if (s?.farmProfile) await this.save(userId, { farmProfile: { ...s.farmProfile, deliveries: s.farmProfile.deliveries + 1, updatedAt: this.now() } }); // ประวัติการส่งมอบ
         return reply([text(['อนุมัติแล้ว ✓ ดีลตกลงครบทุกคน 🎉', 'สถานะ: ตกลงดีลแล้ว · ส่งมอบ: ยังไม่เริ่ม · ชำระเงิน: ยังไม่ถึงกำหนด (แยกสถานะกัน)', 'ผู้ซื้อโอนเงินตรงเข้าบัญชีของคุณหลังส่งมอบ ระบบไม่ถือเงิน', 'ทุกขั้นถูกบันทึกใน ledger แบบ hash chain', '', MOCK_NOTE].join('\n'))]);
       }
       return reply(this.notAgreed('อนุมัติแล้ว ✓ แต่ดีลยังปิดไม่ได้', r, pb.dealId));

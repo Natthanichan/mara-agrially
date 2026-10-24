@@ -7,10 +7,11 @@ import type { BuyerDraft, BuyerRequest, ListingDraft } from '../store/types.js';
 import type { LineMessage } from './client.js';
 import { DECISION_TH, type RoundSummary } from './rounds.js';
 import { BASIS_TH, type TransportEstimate } from '../core/transportEstimate.js';
+import { expectedYieldKg, monthTh, SOIL_TH, type CropAdvice, type FarmProfile } from '../core/farmProfile.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other', 'farm_sell', 'farm_plan', 'farm_profile', 'plan_crop', 'plan_advise', 'farm_sell_profile'] as const;
 export type Act = (typeof ACTS)[number];
 const CROPS: Crop[] = ALL_CROPS;
 export const postbackData = (act: Act, dealId?: string, crop?: Crop) => new URLSearchParams({ act, ...(dealId ? { d: dealId } : {}), ...(crop ? { c: crop } : {}) }).toString();
@@ -66,7 +67,8 @@ export const helpMessage = (): LineMessage =>
       'พิมพ์ผลผลิตของคุณมาได้เลย ระบุ 3 อย่าง: พืช ปริมาณ และราคาสุทธิขั้นต่ำที่ยอมรับได้ เช่น',
       '“ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”',
       '',
-      'พืชที่รองรับตอนนี้: ข้าวหอมมะลิ, มะระจีน, มันสำปะหลัง',
+      'พืชที่รองรับตอนนี้: ข้าวหอมมะลิ, ยางพารา, ข้าวโพดเลี้ยงสัตว์, มะระจีน, มันสำปะหลัง',
+      'กำลังวางแผนปลูก? พิมพ์ “โปรไฟล์ฟาร์ม” ให้น้องช่วยเก็บข้อมูลแปลงและแนะนำพืชได้ค่ะ',
       '',
       MOCK_NOTE,
     ].join('\n'),
@@ -465,3 +467,73 @@ export function negotiationConfirmEnd(lastOffer: number | undefined, askPerKg: n
 /** บรรทัดสถานะที่โค้ดเขียนเอง — ให้เห็นชัดว่าแต่ละฝั่งเสนอเท่าไร */
 export const negotiationStatusLine = (offer: number | undefined, askPerKg: number, round: number) =>
   `รอบ ${round} · ${offer !== undefined ? `คุณเสนอ ${baht(offer)} · ` : ''}หนูเสนอ ${baht(askPerKg)} บาท/กก.`;
+
+// ---------- Farm Profile ----------
+
+const quick = (labels: string[]) => ({ items: labels.slice(0, 13).map((l) => ({ type: 'action', action: { type: 'message', label: l.slice(0, 20), text: l } })) });
+
+/** หลังเลือก "ฉันเป็นเกษตรกร": มีผลผลิตพร้อมขาย / กำลังวางแผนปลูก */
+export const farmerStartMessage = (hasProfile: boolean): LineMessage =>
+  bubble(
+    'เกษตรกร: ตอนนี้เป็นช่วงไหนคะ 🌱',
+    [{ type: 'text', text: 'ถ้ากำลังวางแผนปลูก น้องมะระจะช่วยเก็บข้อมูลแปลงไว้ล่วงหน้า พอถึงรอบขายก็กดขายได้ทันทีค่ะ', size: 'sm', wrap: true }],
+    [
+      button('มีผลผลิตพร้อมขาย', postbackData('farm_sell'), 'มีผลผลิตพร้อมขาย', 'primary', '#2E7D32'),
+      button('กำลังวางแผนปลูก', postbackData('farm_plan'), 'กำลังวางแผนปลูก', 'secondary'),
+      ...(hasProfile ? [button('ดูโปรไฟล์ฟาร์มของฉัน', postbackData('farm_profile'), 'ดูโปรไฟล์ฟาร์ม', 'secondary')] : []),
+    ],
+    'ตอนนี้: มีผลผลิตพร้อมขาย / กำลังวางแผนปลูก',
+  );
+
+export const planCropMessage = (): LineMessage =>
+  bubble(
+    'วางแผนปลูก (1/6): จะปลูกอะไรคะ',
+    [{ type: 'text', text: 'ยังไม่แน่ใจก็ได้ค่ะ ตอบคำถามสั้น ๆ แล้วหนูจะแนะนำพืชที่เหมาะกับแปลงให้', size: 'sm', wrap: true }],
+    [
+      ...ALL_CROPS.map((c) => button(CROP_SHORT_TH[c], postbackData('plan_crop', undefined, c), CROP_LABEL_TH[c], 'secondary')),
+      button('ยังไม่แน่ใจ ขอคำแนะนำ', postbackData('plan_advise'), 'ยังไม่แน่ใจ ขอคำแนะนำ', 'primary', '#2E7D32'),
+    ],
+    'จะปลูกอะไร: ข้าว ยาง ข้าวโพด มะระ มันสำปะหลัง หรือขอคำแนะนำ',
+  );
+
+export const planAskRai = (): LineMessage => ({ ...text('วางแผนปลูก (2/6): มีพื้นที่กี่ไร่คะ พิมพ์ตัวเลขได้เลย เช่น “10 ไร่”'), quickReply: quick(['5 ไร่', '10 ไร่', '20 ไร่', '50 ไร่']) });
+export const planAskSoil = (): LineMessage => ({ ...text('วางแผนปลูก (3/6): ดินในแปลงเป็นแบบไหนคะ'), quickReply: quick(['ดินร่วน', 'ดินเหนียว', 'ดินทราย', 'ไม่แน่ใจ']) });
+export const planAskPrevious = (): LineMessage => ({ ...text('วางแผนปลูก (4/6): รอบที่แล้วปลูกอะไรคะ (ช่วยให้หนูแนะนำการสลับพืชได้)'), quickReply: quick(['ข้าว', 'มันสำปะหลัง', 'ข้าวโพด', 'อ้อย', 'ยางพารา', 'ไม่ได้ปลูก']) });
+export const planAskProvince = (): LineMessage => ({ ...text('วางแผนปลูก (5/6): แปลงอยู่จังหวัดอะไรคะ พิมพ์ชื่อจังหวัดได้เลย เช่น “ร้อยเอ็ด”'), quickReply: quick(['ข้าม']) });
+export const planAskHarvest = (months: string[]): LineMessage => ({ ...text('วางแผนปลูก (6/6): คาดว่าจะเก็บเกี่ยวเดือนไหนคะ'), quickReply: quick([...months.map(monthTh), 'ยังไม่ทราบ']) });
+export const planAskFloor = (cropLabel: string): LineMessage => ({
+  ...text(`ตั้งราคาสุทธิขั้นต่ำของ${cropLabel}ไว้ล่วงหน้าไหมคะ พอถึงรอบขาย น้องมะระจะไม่รับข้อเสนอที่ต่ำกว่านี้ และคุณยังต้องกดอนุมัติเองทุกครั้ง\nพิมพ์ราคาต่อกก. เช่น “17” หรือกด “ข้าม”`),
+  quickReply: quick(['ข้าม']),
+});
+
+/** สรุปโปรไฟล์ฟาร์ม + คำแนะนำพืช */
+export function farmProfileMessage(p: FarmProfile, advice: CropAdvice[]): LineMessage {
+  const exp = expectedYieldKg(p);
+  const body: LineMessage[] = [
+    row('พืชที่วางแผน', p.crop ? CROP_LABEL_TH[p.crop] : 'ยังไม่ตัดสินใจ'),
+    row('พื้นที่', `${p.rai.toLocaleString('en-US')} ไร่`),
+    row('เนื้อดิน', SOIL_TH[p.soil]),
+    row('ปลูกรอบก่อน', p.previousCrop ?? '-'),
+    row('จังหวัด', p.province ?? '-'),
+    ...(p.harvestMonth ? [row('คาดเก็บเกี่ยว', monthTh(p.harvestMonth))] : []),
+    ...(exp !== undefined ? [row('ผลผลิตคาดการณ์', `≈ ${qty(exp)}`, true)] : []),
+    ...(p.floorPerKg !== undefined ? [row('ราคาขั้นต่ำที่ตั้งไว้', `${baht(p.floorPerKg)} บาท/กก.`)] : []),
+    row('ประวัติส่งมอบ', `${p.deliveries} ดีล`),
+  ];
+  if (advice.length) {
+    body.push({ type: 'separator' }, { type: 'text', text: p.crop ? 'ตัวเลือกอื่นที่เหมาะกับแปลงนี้' : 'น้องมะระแนะนำ', weight: 'bold', size: 'sm', color: '#1B5E20' });
+    advice.forEach((a, i) =>
+      body.push({ type: 'text', text: `${i + 1}. ${CROP_LABEL_TH[a.crop]} (≈ ${qty(a.expectedKg)})${a.reasons.length ? ` · ${a.reasons.join(' · ')}` : ''}`, size: 'xs', color: '#333333', wrap: true }),
+    );
+  }
+  body.push({ type: 'text', text: 'ผลผลิตคาดการณ์และคำแนะนำคิดจากค่าเฉลี่ยโดยประมาณในระบบ เป็นข้อมูลเบื้องต้น ควรปรึกษาเกษตรอำเภอประกอบด้วย', size: 'xxs', color: '#888888', wrap: true });
+  const footer = p.crop
+    ? [button('ถึงรอบขายแล้ว ใช้ข้อมูลนี้', postbackData('farm_sell_profile'), 'ถึงรอบขายแล้ว', 'primary', '#2E7D32'), button('แก้ไขโปรไฟล์', postbackData('farm_plan'), 'แก้ไขโปรไฟล์', 'secondary')]
+    : [...advice.map((a) => button(`เลือก${CROP_SHORT_TH[a.crop]}`, postbackData('plan_crop', undefined, a.crop), `เลือก${CROP_LABEL_TH[a.crop]}`, 'secondary')), button('แก้ไขโปรไฟล์', postbackData('farm_plan'), 'แก้ไขโปรไฟล์', 'secondary')];
+  return bubble('โปรไฟล์ฟาร์มของคุณ 🌾', body, footer, `โปรไฟล์ฟาร์ม: ${p.crop ? CROP_LABEL_TH[p.crop] : 'ยังไม่เลือกพืช'} ${p.rai} ไร่`);
+}
+
+export const askActualQuantity = (cropLabel: string, expectedKg?: number): LineMessage => ({
+  ...text(`เก็บเกี่ยว${cropLabel}ได้จริงเท่าไหร่คะ ตอบเป็นตันหรือกิโลกรัม${expectedKg ? ` (โปรไฟล์คาดไว้ ≈ ${qty(expectedKg)})` : ''}`),
+  ...(expectedKg ? { quickReply: quick([expectedKg >= 1000 ? `${(expectedKg / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })} ตัน` : `${expectedKg} กิโลกรัม`]) } : {}),
+});
