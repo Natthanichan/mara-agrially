@@ -39,9 +39,24 @@ export interface BuyerRequest {
   createdAt: string;
 }
 
+/** กลุ่มเพื่อนเกษตรกรที่ผู้ใช้สร้างใน LINE (ต้นแบบ: การเจรจายังใช้กลุ่มจำลอง) */
+export interface FarmerGroup {
+  code: string;
+  name: string;
+  ownerUserId: string;
+  members: string[];
+  createdAt: string;
+}
+
 /** สถานะการคุยกับผู้ใช้ LINE 1 คน (เกษตรกรหรือผู้ซื้อ) */
 export interface LineSession {
   role?: LineRole;
+  /** กำลังรอคำตอบอะไรจากเกษตรกร */
+  awaiting?: 'group_code' | 'group_name';
+  /** mock = รหัสกลุ่มจำลอง, joined/created = กลุ่มที่ผู้ใช้สร้าง, auto = ให้น้องมะระจับกลุ่มให้ */
+  groupMode?: 'mock' | 'joined' | 'created' | 'auto';
+  groupCode?: string;
+  groupName?: string;
   draft?: ListingDraft;
   buyerDraft?: BuyerDraft;
   lastDealId?: string;
@@ -94,4 +109,9 @@ export interface DealStore {
   createBuyerRequest(r: BuyerRequest): Promise<void>;
   /** คำขอซื้อของผู้ใช้คนนี้ ใหม่สุดก่อน */
   listBuyerRequests(userId: string, limit: number): Promise<BuyerRequest[]>;
+  /** สร้างกลุ่ม คืน false ถ้ารหัสนี้มีอยู่แล้ว */
+  createFarmerGroup(g: FarmerGroup): Promise<boolean>;
+  getFarmerGroup(code: string): Promise<FarmerGroup | undefined>;
+  /** เพิ่มสมาชิก (ซ้ำได้ไม่เป็นไร) คืนกลุ่มหลังเพิ่ม หรือ undefined ถ้าไม่มีกลุ่ม */
+  joinFarmerGroup(code: string, userId: string): Promise<FarmerGroup | undefined>;
 }

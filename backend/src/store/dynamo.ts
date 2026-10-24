@@ -8,6 +8,7 @@
 //   LINEEVENT   / <webhookEventId> กัน LINE ส่ง event ซ้ำ — มี ttl
 //   BUYERREQ#<uid>        / <createdAt>#<id>  ความต้องการซื้อของผู้ซื้อ (ดูของตัวเอง)
 //   BUYERREQ#OPEN#<crop>  / <createdAt>#<id>  ดัชนีตามพืช (ไว้จับคู่แจ้งเตือนผู้ซื้อในขั้นต่อไป)
+//   FGROUP#<code>         / META              กลุ่มเพื่อนเกษตรกรที่ผู้ใช้สร้าง (members เป็น string set)
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -21,7 +22,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { LedgerEvent } from '../core/ledger.js';
 import type { NabcRecord, SnapshotStore } from '../market/nabcClient.js';
-import type { BuyerRequest, DealRecord, DealStore, LineSession } from './types.js';
+import type { BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
 
 type Doc = Pick<DynamoDBDocumentClient, 'send'>;
 
@@ -194,6 +195,43 @@ export class DynamoDealStore implements DealStore {
     return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerRequest);
   }
 
+  async createFarmerGroup(g: FarmerGroup) {
+    const { members, ...rest } = g;
+    try {
+      await this.db.send(
+        new PutCommand({ TableName: this.table, Item: { pk: `FGROUP#${g.code}`, sk: 'META', ...rest, members: new Set(members) }, ConditionExpression: 'attribute_not_exists(pk)' }),
+      );
+      return true;
+    } catch (e) {
+      if (isConditionFail(e)) return false;
+      throw e;
+    }
+  }
+
+  async getFarmerGroup(code: string) {
+    const r = await this.db.send(new GetCommand({ TableName: this.table, Key: { pk: `FGROUP#${code}`, sk: 'META' }, ConsistentRead: true }));
+    return r.Item ? toGroup(r.Item) : undefined;
+  }
+
+  async joinFarmerGroup(code: string, userId: string) {
+    try {
+      const r = await this.db.send(
+        new UpdateCommand({
+          TableName: this.table,
+          Key: { pk: `FGROUP#${code}`, sk: 'META' },
+          UpdateExpression: 'ADD members :u',
+          ConditionExpression: 'attribute_exists(pk)',
+          ExpressionAttributeValues: { ':u': new Set([userId]) },
+          ReturnValues: 'ALL_NEW',
+        }),
+      );
+      return r.Attributes ? toGroup(r.Attributes) : undefined;
+    } catch (e) {
+      if (isConditionFail(e)) return undefined;
+      throw e;
+    }
+  }
+
   async claimWebhookEvent(eventId: string) {
     const ttl = Math.floor(Date.now() / 1000) + 2 * 86_400;
     try {
@@ -205,6 +243,11 @@ export class DynamoDealStore implements DealStore {
     }
   }
 }
+
+const toGroup = (item: Record<string, unknown>): FarmerGroup => {
+  const { pk: _p, sk: _s, members, ...rest } = item;
+  return { ...(rest as Omit<FarmerGroup, 'members'>), members: [...((members as Set<string> | string[] | undefined) ?? [])] };
+};
 
 /** snapshot ราคา NABC รายวันใน DynamoDB — API ล่มก็ยังมีข้อมูลล่าสุด */
 export class DynamoSnapshotStore implements SnapshotStore {

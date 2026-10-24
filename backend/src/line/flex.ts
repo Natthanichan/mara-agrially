@@ -8,7 +8,7 @@ import type { LineMessage } from './client.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto'] as const;
 export type Act = (typeof ACTS)[number];
 const CROPS: Crop[] = ['rice_hommali', 'bitter_gourd', 'cassava'];
 export const postbackData = (act: Act, dealId?: string, crop?: Crop) => new URLSearchParams({ act, ...(dealId ? { d: dealId } : {}), ...(crop ? { c: crop } : {}) }).toString();
@@ -176,3 +176,51 @@ export function buyerRequestsMessage(list: BuyerRequest[]): LineMessage {
   if (!list.length) return text('ยังไม่มีคำขอซื้อค่ะ พิมพ์อะไรมาก็ได้เพื่อเริ่มลงทะเบียน');
   return text(['คำขอซื้อล่าสุดของคุณ', ...list.map((r, i) => `${i + 1}. ${CROP_LABEL_TH[r.crop]} ${qty(r.quantityKg)} ส่งที่ ${r.location} เสนอ ${baht(r.offerPerKg)} บาท/กก.`)].join('\n'));
 }
+
+// ---------- กลุ่มเพื่อนเกษตรกร ----------
+
+export const groupChoiceMessage = (): LineMessage =>
+  bubble(
+    'รวมกลุ่มกับเพื่อนเกษตรกร 🤝',
+    [{ type: 'text', text: 'ขายรวมกันได้ราคาดีกว่าขายคนเดียวค่ะ มีรหัสกลุ่มเพื่อนเกษตรกรไหมคะ', size: 'sm', wrap: true }],
+    [
+      button('มีรหัสกลุ่ม', postbackData('group_join'), 'มีรหัสกลุ่ม', 'primary', '#2E7D32'),
+      button('สร้างกลุ่มใหม่', postbackData('group_create'), 'สร้างกลุ่มใหม่', 'secondary'),
+      button('ให้น้องมะระหากลุ่มให้', postbackData('group_auto'), 'ให้น้องมะระหากลุ่มให้', 'secondary'),
+    ],
+    'มีรหัสกลุ่มเพื่อนเกษตรกรไหม: มีรหัสกลุ่ม / สร้างกลุ่มใหม่ / ให้น้องมะระหากลุ่มให้',
+  );
+
+export const askGroupCode = () => text('พิมพ์รหัสกลุ่มที่เพื่อนส่งให้ได้เลยค่ะ (ตัวเลข 4–6 หลัก)');
+export const askGroupName = () => text('ตั้งชื่อกลุ่มได้เลยค่ะ เช่น “กลุ่มข้าวหอมบ้านโนนสูง”');
+export const groupNotFound = () => text('ไม่พบกลุ่มรหัสนี้ค่ะ ลองตรวจรหัสอีกครั้ง หรือพิมพ์ “ยกเลิก” แล้วเลือกสร้างกลุ่มใหม่ก็ได้นะคะ');
+
+export function joinedMockGroupMessage(code: string, g: { members: number; province: string; cropLabel: string; totalKg: number }): LineMessage {
+  return text(
+    [
+      `เข้ากลุ่มรหัส ${code} แล้วค่ะ ✓`,
+      `${g.cropLabel} · จ.${g.province} · สมาชิก ${g.members} คน · รวม ${qty(g.totalKg)}`,
+      '',
+      'ต่อไปพิมพ์ผลผลิตของคุณได้เลยค่ะ ระบุพืช ปริมาณ และราคาสุทธิขั้นต่ำ เช่น',
+      '“ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”',
+    ].join('\n'),
+  );
+}
+
+export function joinedGroupMessage(name: string, code: string, memberCount: number): LineMessage {
+  return text([`เข้ากลุ่ม “${name}” (รหัส ${code}) แล้วค่ะ ✓ ตอนนี้มีสมาชิก ${memberCount} คน`, '', 'ต่อไปพิมพ์ผลผลิตของคุณได้เลยค่ะ เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”'].join('\n'));
+}
+
+export function createdGroupMessages(name: string, code: string): LineMessage[] {
+  return [
+    text(`สร้างกลุ่ม “${name}” แล้วค่ะ 🎉\nรหัสกลุ่ม: ${code}\n\nส่งรหัสนี้ให้เพื่อนเกษตรกร แล้วให้เพื่อนเพิ่มน้องมะระเป็นเพื่อน กด “ฉันเป็นเกษตรกร” → “มีรหัสกลุ่ม” แล้วพิมพ์รหัสนี้ได้เลยค่ะ`),
+    text(['ต่อไปพิมพ์ผลผลิตของคุณได้เลยค่ะ เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”', '', '(ต้นแบบ: ระหว่างรอเพื่อนเข้ากลุ่ม น้องมะระจะรวมผลผลิตของคุณกับเกษตรกรจำลองในพื้นที่เพื่อเจรจาค่ะ)'].join('\n')),
+  ];
+}
+
+export const autoGroupMessage = () =>
+  text('ได้ค่ะ หนูจะหาเพื่อนเกษตรกรที่ปลูกพืชเดียวกัน เกรดเดียวกัน ในจังหวัดเดียวกัน แล้วรวมกลุ่มให้หลังคุณพิมพ์ผลผลิตนะคะ\n\nพิมพ์ผลผลิตได้เลย เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”');
+
+/** สรุปกลุ่มตอนเริ่มเจรจา */
+export const groupSummaryText = (prefix: string, g: { members: number; province: string; totalKg: number }) =>
+  text(`${prefix}: รวมกับเพื่อนเกษตรกรอีก ${g.members - 1} คน · จ.${g.province} · รวม ${qty(g.totalKg)} ค่ะ`);

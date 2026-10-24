@@ -162,6 +162,8 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     await post([{ type: 'follow' }]);
     expect(buttons(last().messages[0]!).map((b) => b.label)).toEqual(['ฉันเป็นเกษตรกร', 'ฉันเป็นผู้ซื้อ']);
     await tap(postbackData('role_farmer'));
+    expect(buttons(last().messages[0]!).map((b) => b.label)).toEqual(['มีรหัสกลุ่ม', 'สร้างกลุ่มใหม่', 'ให้น้องมะระหากลุ่มให้']);
+    await tap(postbackData('group_auto'));
     expect(asText(last().messages[0]!)).toContain('ขั้นต่ำ');
     await say('ข้าวหอมมะลิ 12 ตัน');
     expect(asText(last().messages[0]!)).toContain('ราคาสุทธิขั้นต่ำ');
@@ -177,7 +179,8 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     expect(store.deals.size).toBe(0); // ยังไม่เริ่มจนกว่าจะกดยืนยัน
 
     await tap(postbackData('confirm'));
-    expect(asText(last().messages[0]!)).toContain('เริ่มเจรจา');
+    expect(last().messages.map(asText).join(' ')).toContain('เริ่มเจรจา');
+    expect(asText(last().messages[0]!)).toContain('รวมกับเพื่อนเกษตรกรอีก 3 คน'); // บอกกลุ่มที่ถูกรวม
     const pushes = sent.filter((s) => s.kind === 'push');
     expect(pushes).toHaveLength(1);
     expect(pushes[0]!.to).toBe('U-farmer');
@@ -483,5 +486,101 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
     expect(all.length).toBeGreaterThan(2000);
     expect(all).not.toMatch(/ครับ|ผม(?!ลิต|ลไม้)/);
     expect(all).toContain('ค่ะ');
+  });
+});
+
+describe('กลุ่มเพื่อนเกษตรกร: ใส่รหัส / สร้างกลุ่ม / ให้น้องมะระหาให้', () => {
+  const allText = (m: { messages: LineMessage[] }) => m.messages.map(asText).join(' ');
+
+  it('รหัสจำลอง 12345 (และ 1234) → เข้ากลุ่มข้าว ร้อยเอ็ด แล้วเจรจาต่อได้ และสรุปบอกรหัสกลุ่ม', async () => {
+    for (const code of ['12345', '1234']) {
+      const h = setup();
+      await h.tap(postbackData('role_farmer'));
+      await h.tap(postbackData('group_join'));
+      expect(asText(h.last().messages[0]!)).toContain('รหัสกลุ่ม');
+      await h.say(code);
+      const joined = asText(h.last().messages[0]!);
+      expect(joined).toContain(`รหัส ${code}`);
+      expect(joined).toContain('ร้อยเอ็ด');
+      expect(joined).toContain('สมาชิก 4 คน');
+      await h.say(ROOF);
+      await h.tap(postbackData('confirm'));
+      expect(allText(h.last())).toContain(`กลุ่มรหัส ${code}`);
+      expect((await h.store.getDeal('deal-1'))!.status).toBe('pending_approval');
+    }
+  });
+
+  it('รหัสผิดรูปแบบหรือไม่มีอยู่ → บอกและรอรหัสใหม่ · พิมพ์ "ยกเลิก" ออกได้', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_join'));
+    await h.say('abc');
+    expect(asText(h.last().messages[0]!)).toContain('4–6 หลัก');
+    await h.say('99999');
+    expect(asText(h.last().messages[0]!)).toContain('ไม่พบกลุ่ม');
+    expect((await h.store.getLineSession('U-farmer'))?.awaiting).toBe('group_code');
+    await h.say('ยกเลิก');
+    expect((await h.store.getLineSession('U-farmer'))?.awaiting).toBeUndefined();
+  });
+
+  it('กลุ่มจำลองเป็นกลุ่มข้าว: พิมพ์มะระ → แนะนำให้หากลุ่มใหม่ ไม่เริ่มดีลผิดกลุ่ม', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_join'));
+    await h.say('12345');
+    await h.say('มะระจีน 1.8 ตัน ขั้นต่ำ 18 บาท/กก.');
+    expect(asText(h.last().messages[0]!)).toContain('เป็นกลุ่มข้าวเปลือกหอมมะลิ');
+    expect((await h.store.getLineSession('U-farmer'))?.draft).toBeUndefined();
+  });
+
+  it('สร้างกลุ่ม → ตั้งชื่อ → ได้รหัส 5 หลัก → เพื่อนใส่รหัสนั้นแล้วเข้ากลุ่มเดียวกัน (สมาชิก 2 คน)', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_farmer'));
+    await h.tap(postbackData('group_create'));
+    expect(asText(h.last().messages[0]!)).toContain('ตั้งชื่อกลุ่ม');
+    await h.say('ก');
+    expect(asText(h.last().messages[0]!)).toContain('2–40');
+    await h.say('กลุ่มข้าวหอมบ้านโนนสูง');
+    const created = allText(h.last());
+    const code = /รหัสกลุ่ม: (\d{5})/.exec(created)?.[1];
+    expect(code).toBeDefined();
+    expect(['12345', '1234']).not.toContain(code);
+    expect(created).toContain('ต้นแบบ'); // บอกตรงๆ ว่าการเจรจายังใช้กลุ่มจำลอง
+    expect(h.store.groups.get(code!)).toMatchObject({ name: 'กลุ่มข้าวหอมบ้านโนนสูง', ownerUserId: 'U-farmer', members: ['U-farmer'] });
+
+    await h.tap(postbackData('role_farmer'), 'U-friend');
+    await h.tap(postbackData('group_join'), 'U-friend');
+    await h.say(code!, 'U-friend');
+    expect(asText(h.last().messages[0]!)).toContain('สมาชิก 2 คน');
+    expect(h.store.groups.get(code!)!.members).toEqual(['U-farmer', 'U-friend']);
+
+    // เจ้าของกลุ่มเจรจาต่อได้ตามปกติ และสรุปบอกชื่อกลุ่ม
+    await h.say(ROOF);
+    await h.tap(postbackData('confirm'));
+    expect(allText(h.last())).toContain('กลุ่ม “กลุ่มข้าวหอมบ้านโนนสูง”');
+  });
+});
+
+describe('DynamoDB: กลุ่มเพื่อนเกษตรกร', () => {
+  it('สร้างแบบมีเงื่อนไข (รหัสซ้ำ → false) และเข้ากลุ่มด้วย ADD string set', async () => {
+    const { DynamoDealStore } = await import('../src/store/dynamo.js');
+    const sent: Record<string, any>[] = [];
+    let exists = false;
+    const db = {
+      send: async (cmd: { input: Record<string, any> }) => {
+        sent.push(cmd.input);
+        if (cmd.input.ConditionExpression === 'attribute_not_exists(pk)' && exists) throw Object.assign(new Error('x'), { name: 'ConditionalCheckFailedException' });
+        if (cmd.input.UpdateExpression) return { Attributes: { pk: 'FGROUP#55555', sk: 'META', code: '55555', name: 'ก', ownerUserId: 'U1', createdAt: 't', members: new Set(['U1', 'U2']) } };
+        return {};
+      },
+    };
+    const store = new DynamoDealStore(db as never, 'T');
+    expect(await store.createFarmerGroup({ code: '55555', name: 'ก', ownerUserId: 'U1', members: ['U1'], createdAt: 't' })).toBe(true);
+    expect(sent[0]!.Item.members).toEqual(new Set(['U1']));
+    exists = true;
+    expect(await store.createFarmerGroup({ code: '55555', name: 'ข', ownerUserId: 'U9', members: ['U9'], createdAt: 't' })).toBe(false);
+    const g = await store.joinFarmerGroup('55555', 'U2');
+    expect(sent.at(-1)!.UpdateExpression).toBe('ADD members :u');
+    expect(g).toMatchObject({ code: '55555', members: ['U1', 'U2'] });
   });
 });

@@ -8,6 +8,7 @@
 import {
   AppError,
   approveSimulatedMembers,
+  getDeal,
   getFarmerOffer,
   MAX_LINE_ROUNDS,
   recordApproval,
@@ -18,11 +19,21 @@ import {
 } from '../app/service.js';
 import type { LineMessage, LineSecrets } from './client.js';
 import { LineClient } from './client.js';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import type { Crop } from '../core/types.js';
-import { farmers, listings } from '../data/synthetic.js';
+import { CROP_LABEL_TH, farmers, listings } from '../data/synthetic.js';
+import { groupListings } from '../core/grouping.js';
 import type { BuyerDraft, LineSession } from '../store/types.js';
 import {
+  askGroupCode,
+  askGroupName,
+  autoGroupMessage,
+  createdGroupMessages,
+  groupChoiceMessage,
+  groupNotFound,
+  groupSummaryText,
+  joinedGroupMessage,
+  joinedMockGroupMessage,
   buyerAskLocation,
   buyerAskPrice,
   buyerAskQuantity,
@@ -59,6 +70,15 @@ const STATUS = /^(สถานะ|status)$/i;
 const CANCEL = /^(ยกเลิก|cancel)$/i;
 const MY_REQUESTS = /^(คำขอของฉัน|คำขอซื้อ|รายการของฉัน)$/;
 const MAX_EVENTS = 20;
+
+/** รหัสกลุ่มจำลองสำหรับเดโม → กลุ่มข้าวหอมมะลิ ร้อยเอ็ด (ข้อมูลจำลอง) */
+export const MOCK_GROUP_CODES = ['12345', '1234'];
+const MOCK_GROUP_CROP: Crop = 'rice_hommali';
+
+function mockGroupInfo() {
+  const g = groupListings(listings, farmers).find((x) => x.crop === MOCK_GROUP_CROP)!;
+  return { members: g.members.length, province: g.province, cropLabel: CROP_LABEL_TH[g.crop], totalKg: g.members.reduce((n, m) => n + m.quantityKg, 0) };
+}
 
 const completeBuyerDraft = (d: BuyerDraft) =>
   d.crop && d.quantityKg !== undefined && d.location && d.offerPerKg !== undefined ? { crop: d.crop, quantityKg: d.quantityKg, location: d.location, offerPerKg: d.offerPerKg } : undefined;
@@ -149,15 +169,17 @@ export class LineBot implements LineHooks {
     const t = raw.trim();
     const { store } = this.getCtx();
     if (GREETING.test(t)) {
-      await this.save(userId, { role: undefined, draft: undefined, buyerDraft: undefined });
+      await this.save(userId, { role: undefined, draft: undefined, buyerDraft: undefined, awaiting: undefined });
       return reply([roleMessage()]);
     }
     if (CANCEL.test(t)) {
-      await this.save(userId, { draft: undefined, buyerDraft: undefined });
+      await this.save(userId, { draft: undefined, buyerDraft: undefined, awaiting: undefined });
       return reply([text('ยกเลิกแล้วค่ะ พิมพ์ “เมนู” เพื่อเริ่มใหม่ได้เลย')]);
     }
     const session = await store.getLineSession(userId);
     if (session?.role === 'buyer') return this.onBuyerText(userId, t, session, reply);
+    if (session?.awaiting === 'group_code') return this.onGroupCode(userId, t, reply);
+    if (session?.awaiting === 'group_name') return this.onGroupName(userId, t, reply);
 
     if (STATUS.test(t)) {
       const deal = session?.lastDealId ? await store.getDeal(session.lastDealId) : undefined;
@@ -166,8 +188,39 @@ export class LineBot implements LineHooks {
     const r = parseListing(t);
     // ยังไม่ได้เลือกบทบาท และข้อความไม่เกี่ยวกับผลผลิตเลย → ให้เลือกบทบาทก่อน
     if (!r.ok) return reply([r.problems.length >= 3 ? (session?.role ? helpMessage() : roleMessage()) : problemsMessage(r.problems)]);
+    if (session?.groupMode === 'mock' && r.draft.crop !== MOCK_GROUP_CROP) {
+      return reply([text(`กลุ่มรหัส ${session.groupCode} เป็นกลุ่ม${CROP_LABEL_TH[MOCK_GROUP_CROP]}ค่ะ ถ้าจะขาย${CROP_LABEL_TH[r.draft.crop]} พิมพ์ “เมนู” แล้วเลือก “ให้น้องมะระหากลุ่มให้” ได้เลยนะคะ`)]);
+    }
     await this.save(userId, { draft: r.draft });
     return reply([confirmMessage(r.draft, r.gradeAssumed)]);
+  }
+
+  private async onGroupCode(userId: string, t: string, reply: (m: LineMessage[]) => Promise<void>) {
+    const code = t.replace(/[๐-๙]/g, (d) => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d))).replace(/\s|-/g, '');
+    if (!/^\d{4,6}$/.test(code)) return reply([text('รหัสกลุ่มเป็นตัวเลข 4–6 หลักค่ะ ลองพิมพ์ใหม่อีกครั้ง หรือพิมพ์ “ยกเลิก”')]);
+    if (MOCK_GROUP_CODES.includes(code)) {
+      await this.save(userId, { awaiting: undefined, groupMode: 'mock', groupCode: code, groupName: undefined });
+      return reply([joinedMockGroupMessage(code, mockGroupInfo())]);
+    }
+    const g = await this.getCtx().store.joinFarmerGroup(code, userId);
+    if (!g) return reply([groupNotFound()]);
+    await this.save(userId, { awaiting: undefined, groupMode: 'joined', groupCode: g.code, groupName: g.name });
+    return reply([joinedGroupMessage(g.name, g.code, g.members.length)]);
+  }
+
+  private async onGroupName(userId: string, t: string, reply: (m: LineMessage[]) => Promise<void>) {
+    const name = t.replace(/\s+/g, ' ').trim();
+    if (name.length < 2 || name.length > 40) return reply([text('ชื่อกลุ่มยาว 2–40 ตัวอักษรค่ะ ลองตั้งใหม่อีกครั้งนะคะ')]);
+    const { store } = this.getCtx();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = String(randomInt(10_000, 100_000));
+      if (MOCK_GROUP_CODES.includes(code)) continue;
+      if (await store.createFarmerGroup({ code, name, ownerUserId: userId, members: [userId], createdAt: this.now() })) {
+        await this.save(userId, { awaiting: undefined, groupMode: 'created', groupCode: code, groupName: name });
+        return reply(createdGroupMessages(name, code));
+      }
+    }
+    throw new Error('สุ่มรหัสกลุ่มไม่สำเร็จ');
   }
 
   /** ผู้ซื้อ (คนจริง) ตอบทีละข้อ: พืช → ปริมาณ → สถานที่ส่ง → ราคาที่เสนอ → ยืนยัน */
@@ -217,8 +270,20 @@ export class LineBot implements LineHooks {
     const { store } = ctx;
 
     if (pb.act === 'role_farmer') {
-      await this.save(userId, { role: 'farmer', buyerDraft: undefined });
-      return reply([helpMessage()]);
+      await this.save(userId, { role: 'farmer', buyerDraft: undefined, awaiting: undefined });
+      return reply([groupChoiceMessage()]);
+    }
+    if (pb.act === 'group_join') {
+      await this.save(userId, { role: 'farmer', awaiting: 'group_code' });
+      return reply([askGroupCode()]);
+    }
+    if (pb.act === 'group_create') {
+      await this.save(userId, { role: 'farmer', awaiting: 'group_name' });
+      return reply([askGroupName()]);
+    }
+    if (pb.act === 'group_auto') {
+      await this.save(userId, { role: 'farmer', awaiting: undefined, groupMode: 'auto', groupCode: undefined, groupName: undefined });
+      return reply([autoGroupMessage()]);
     }
     if (pb.act === 'role_buyer' || pb.act === 'buyer_edit') {
       await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'crop' } });
@@ -254,14 +319,16 @@ export class LineBot implements LineHooks {
       if (!draft) return reply([text('ไม่มีรายการรอยืนยันค่ะ พิมพ์ผลผลิตของคุณมาใหม่ได้เลย')]);
       // ล้างร่างก่อนเริ่ม กันกดยืนยันซ้ำแล้วเกิดสองดีล
       await this.save(userId, { draft: undefined });
+      let dealId: string;
       try {
         const { id } = await startDeal(ctx, {}, { line: { userId, draft } });
         await this.save(userId, { lastDealId: id });
+        dealId = id;
       } catch (e) {
         await this.save(userId, { draft }); // ให้กดยืนยันซ้ำได้ (เช่น โควตาเต็ม)
         throw e;
       }
-      return reply([startedMessage()]);
+      return reply([...(await this.groupSummary(dealId, session)), startedMessage()]);
     }
 
     // อนุมัติ / ไม่เอา / ต่อรองใหม่ ต้องมี dealId และต้องเป็นดีลของผู้ใช้คนนี้เท่านั้น
@@ -294,6 +361,21 @@ export class LineBot implements LineHooks {
       return reply([text('บันทึกแล้ว ✓ คุณไม่เอาดีลนี้และถอนตัวจากกลุ่ม\nกลุ่มที่เหลือ (ตัวจำลอง) ผ่านเกณฑ์ราคาและปริมาณ จึงไปต่อและตกลงดีลได้โดยไม่รวมผลผลิตของคุณ\n\n' + MOCK_NOTE)]);
     }
     return reply(this.notAgreed('บันทึกแล้ว ✓ คุณไม่เอาดีลนี้และถอนตัวจากกลุ่ม', r, pb.dealId));
+  }
+
+  /** บอกเกษตรกรว่าผลผลิตถูกรวมกับกลุ่มไหน — ล้มเหลวได้โดยไม่กระทบการเจรจา */
+  private async groupSummary(dealId: string, session: LineSession): Promise<LineMessage[]> {
+    try {
+      const v = await getDeal(this.getCtx(), dealId);
+      const g = { members: v.group.members, province: v.group.province, totalKg: v.group.totalKg };
+      const prefix =
+        session.groupMode === 'mock' ? `กลุ่มรหัส ${session.groupCode}` :
+        session.groupMode === 'created' || session.groupMode === 'joined' ? `กลุ่ม “${session.groupName}” (ต้นแบบ: รวมกับเกษตรกรจำลองในพื้นที่)` :
+        'หนูหากลุ่มให้แล้ว';
+      return [groupSummaryText(prefix, g)];
+    } catch {
+      return [];
+    }
   }
 
   private notAgreed(head: string, r: { reason?: string | undefined; needsRenegotiation: boolean }, dealId: string): LineMessage[] {
