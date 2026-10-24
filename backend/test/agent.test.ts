@@ -91,8 +91,17 @@ describe('Agent + LLM จำลอง: เจรจาครบวงจร', ()
     expect(res.trace.some((t) => t.type === 'tool_call' && t.data.tool === 'search_knowledge')).toBe(true);
     expect(res.trace.some((t) => t.type === 'reasoning' && String(t.data.text).includes('หยุดเจรจากับรายนี้'))).toBe(true); // อ่านนิสัย A
 
-    expect(res.metrics).toMatchObject({ buyersContacted: 3, guardrailBlocks: 0, marketMedianPerKg: 17.65 });
+    expect(res.metrics).toMatchObject({ buyersContacted: 3, marketMedianPerKg: 17.65, unverifiedNumberBlocks: 0 });
+    // บล็อกที่เกิดได้มีแบบเดียว: ข้อเสนอจริงของรายอื่น (17.00) บังเอิญตรงกับราคาขั้นต่ำของสมาชิก → ไม่ส่งตัวเลขนั้น
+    const blocks = res.trace.filter((t) => t.type === 'guardrail_blocked');
+    expect(blocks.every((b) => b.data.code === 'private_data_leak')).toBe(true);
     expect(res.metrics.upliftVsBestOpeningPerKg).toBeGreaterThan(0);
+    expect(res.metrics.upliftVsChosenOpeningPerKg).toBeGreaterThan(0);
+    // ทุกข้อเสนอโต้กลับมีกลยุทธ์ เหตุผล และหลักฐาน
+    const counters = res.trace.filter((t) => t.type === 'counter_sent');
+    expect(counters.length).toBeGreaterThan(3);
+    expect(counters.every((c) => typeof c.data.strategy === 'string' && String(c.data.rationale).length > 0 && Array.isArray(c.data.evidence))).toBe(true);
+    expect(new Set(counters.map((c) => c.data.strategy)).size).toBeGreaterThanOrEqual(3); // ปรับกลยุทธ์ ไม่ใช้แบบเดียว
     expect(ledger.verify().ok).toBe(true);
     expect(ledger.list().length).toBe(res.trace.length);
   });
@@ -138,7 +147,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     let blocked: Record<string, unknown> | undefined;
     const llm = scripted([
       quoteA,
-      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 16.5, message: 'ขอ 16.50' })],
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 16.5, message: 'ขอ 16.50' })],
       (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     const res = await runNegotiation(input(), deps(spy), llm);
@@ -152,7 +161,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     let blocked: Record<string, unknown> | undefined;
     const llm = scripted([
       quoteA,
-      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.5, message: 'สมาชิกบางคนรับได้ต่ำสุด 17.00 บาท' })],
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.5, message: 'สมาชิกบางคนรับได้ต่ำสุด 17.00 บาท' })],
       (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     await runNegotiation(input(), deps(), llm);
@@ -163,7 +172,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     let blocked: Record<string, unknown> | undefined;
     const llm = scripted([
       (req) => [tool('request_quote', { buyer_id: 'B-C' })],
-      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-C'), price_per_kg: 18.3, message: 'ขอ 18.30' })],
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-C'), price_per_kg: 18.3, message: 'ขอ 18.30' })],
       (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     await runNegotiation(input(), deps(), llm);
@@ -190,7 +199,7 @@ describe('Guardrails: โค้ดคุม LLM', () => {
 
   it('เจรจาเกินจำนวนรอบต่อผู้ซื้อ → บล็อก', async () => {
     let blocked: Record<string, unknown> | undefined;
-    const counter = (req: LlmRequest) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอ 18.90' })];
+    const counter = (req: LlmRequest) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอ 18.90' })];
     // จำกัด 2 รอบ → ครั้งที่ 3 ต้องถูกบล็อก
     const llm = scripted([quoteA, counter, counter, counter, (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'x' })])]);
     await runNegotiation({ ...input(), maxRoundsPerBuyer: 2 }, deps(), llm);
@@ -313,7 +322,7 @@ describe('กันส่งเรื่องให้เกษตรกรก�
   it('ต่อรองแล้วอย่างน้อยหนึ่งรอบกับทุกรายที่เปิดอยู่ → escalate ได้เลย', async () => {
     const llm = scripted([
       () => [tool('request_quote', { buyer_id: 'B-A' })],
-      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอราคาตามตลาด' })],
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอราคาตามตลาด' })],
       () => [tool('escalate_to_farmers', { reason: 'test' })],
     ]);
     const res = await runNegotiation(input(), deps(), llm);

@@ -28,18 +28,58 @@ interface SessionView {
   evaluation?: OfferEvaluation;
   roundsLeft: number;
   lastAttempt?: number;
+  /** ข้อโต้แย้งล่าสุดของผู้ซื้อ */
+  objection?: string;
+  /** หลักฐานที่อ้างกับผู้ซื้อรายนี้ไปแล้ว */
+  cited: Set<string>;
+  buyerId: string;
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/** ข้อโต้แย้ง → หลักฐานที่ตอบได้ตรงที่สุด */
+const OBJECTION_EVIDENCE: Record<string, string> = {
+  need_market_reference: 'market',
+  need_volume: 'E-VOL',
+  need_quality_grade: 'E-GRADE',
+  need_delivery_ready: 'E-DELIVERY',
+  need_consolidated_logistics: 'E-LOGISTICS',
+  need_competing_offer: 'competing',
+  need_buyer_history: 'history',
+};
+
+/** ข้อเท็จจริงของกลุ่มที่ใช้ได้ตั้งแต่ต้น (LLM จริงเห็นใน brief) — ข้อความไม่มีตัวเลข */
+const BASE_SAY: Record<string, string> = {
+  'E-VOL': 'กลุ่มเรารวมผลผลิตส่งเป็นล็อตเดียว',
+  'E-GRADE': 'ผลผลิตเกรดเดียวกันทุกราย ยินดีให้ตรวจคุณภาพก่อนรับ',
+  'E-DELIVERY': 'ส่งมอบได้ตามช่วงที่ตกลง พร้อมนัดวันชัดเจน',
+  'E-LOGISTICS': 'เราจัดรถรวมส่งให้ ผู้ซื้อไม่ต้องรับทีละแปลง',
+};
+
+/** ประโยคเปิดเพื่อตอบข้อโต้แย้ง (ไม่มีตัวเลข) */
+const OBJECTION_REPLY: Record<string, string> = {
+  need_market_reference: 'เรื่องราคาตลาด ขอให้ข้อมูลอ้างอิงค่ะ',
+  need_volume: 'เรื่องปริมาณ กลุ่มเราส่งเป็นล็อตเดียวค่ะ',
+  need_quality_grade: 'เรื่องคุณภาพ ขอยืนยันข้อมูลเกรดค่ะ',
+  need_delivery_ready: 'เรื่องการส่งมอบ เราพร้อมตามช่วงนี้ค่ะ',
+  need_consolidated_logistics: 'เรื่องการรับสินค้า เราจัดรถรวมให้แล้วค่ะ',
+  price_above_budget: 'เข้าใจเรื่องงบค่ะ ขอปรับให้ใกล้กันขึ้น',
+  unrealistic_ask: 'ขอปรับข้อเสนอให้สมเหตุสมผลขึ้นค่ะ',
+  repeated_argument: 'ขอเพิ่มข้อมูลใหม่ค่ะ',
+  final_stretch: 'ใกล้กันมากแล้วค่ะ',
+};
 const fmt = (n: number) => n.toFixed(2);
 
 export class RuleBasedMockLlm implements LlmClient {
   readonly name = 'mock:rule-based';
   private seq = 0;
   private dropped = new Set<string>();
+  /** หลักฐานที่มีตอนนี้ id → label (อ่านจากผล tool เหมือน LLM จริง) */
+  private evidence = new Map<string, string>();
   private searchedDeduction = new Set<string>();
 
-  constructor(private maxRoundsPerBuyer = 5) {}
+  /** useEvidence=false: เจรจาด้วยตัวเลขอย่างเดียว ไม่อ้างหลักฐาน (ใช้เป็น baseline ใน eval) */
+  constructor(private maxRoundsPerBuyer = 5, private opts: { useEvidence?: boolean } = {}) {}
 
   async converse(req: LlmRequest): Promise<LlmResponse> {
     const calls = this.collectCalls(req);
@@ -102,11 +142,27 @@ export class RuleBasedMockLlm implements LlmClient {
 
     // 3) ประเมินราคาสุทธิของใบเสนอราคาแรก
     if (!has('evaluate_offer')) {
-      return [{ text: 'ได้ใบเสนอราคาแล้ว คำนวณราคาสุทธิหลังค่าขนส่งและส่วนหักก่อนตัดสินใจ' }, ...sessions.map((s) => this.use('evaluate_offer', { session_id: s.id }))];
+      return [
+        { text: 'ได้ใบเสนอราคาแล้ว คำนวณราคาสุทธิและดูประวัติผู้ซื้อก่อนตัดสินใจ' },
+        ...sessions.map((s) => this.use('evaluate_offer', { session_id: s.id })),
+        ...sessions.map((s) => this.use('get_negotiation_history', { buyer_id: s.buyerId })),
+      ];
     }
 
     // 4) เจรจา
+    this.evidence = this.collectEvidence(calls);
     return this.negotiate(sessions, median, cropLine, kg);
+  }
+
+  private collectEvidence(calls: Call[]): Map<string, string> {
+    const m = new Map<string, string>();
+    for (const c of calls) {
+      const listed = [...((c.result?.evidence ?? []) as unknown[]), ...((c.result?.leverage ?? []) as unknown[])] as { id: string; label: string; say?: string; note?: string }[];
+      for (const e of listed) if (!e.note) m.set(e.id, e.say ?? e.id); // ไม่อ้างข้อมูลจำลองเป็นข้อเท็จจริง
+    }
+    // ข้อเท็จจริงของกลุ่มที่อยู่ใน brief ตั้งแต่ต้น
+    for (const [id, say] of Object.entries(BASE_SAY)) if (!m.has(id)) m.set(id, say);
+    return m;
   }
 
   private sessions(calls: Call[]): SessionView[] {
@@ -126,6 +182,8 @@ export class RuleBasedMockLlm implements LlmClient {
           contested: false,
           leakBlocked: false,
           roundsLeft: this.maxRoundsPerBuyer,
+          cited: new Set(),
+          buyerId: String(r.session_id).split('-').slice(2, 4).join('-'),
         });
       }
       const s = map.get(String(c.input.session_id ?? ''));
@@ -142,11 +200,13 @@ export class RuleBasedMockLlm implements LlmClient {
         s.rounds = Number(r.roundsUsed ?? s.rounds + 1);
         s.roundsLeft = Number(r.roundsLeft ?? 0);
         s.evaluation = r.evaluation as OfferEvaluation;
+        s.objection = (r.objection as { code?: string } | undefined)?.code;
+        for (const id of (c.input.evidence_ids as string[] | undefined) ?? []) s.cited.add(id);
       }
       if (c.name === 'submit_counter') s.lastAttempt = Number(c.input.price_per_kg);
       if (c.name === 'submit_counter' && r.blocked) {
         // ถูกบล็อก (เช่น ต่ำกว่า floor) → จำราคาที่พยายามไว้ จะขยับขึ้นรอบหน้า
-        if (r.code === 'private_data_leak') s.leakBlocked = true; // ราคาเดิมใช้ได้ แค่ข้อความผิด
+        if (r.code === 'private_data_leak' || r.code === 'unverified_number') s.leakBlocked = true; // ราคาเดิมใช้ได้ แค่ข้อความผิด
         else s.asks.push(Math.max(Number(c.input.price_per_kg), s.evaluation?.minGrossPriceToPassAll ?? 0));
       }
     }
@@ -203,29 +263,35 @@ export class RuleBasedMockLlm implements LlmClient {
         actions.push(this.use('search_knowledge', { query: 'สัญญาณค่าหักแฝง หักความชื้นเหมา วิธีต่อรอง' }));
       }
 
+      // ราคา: เปิดสูงกว่าเป้าแบบสัดส่วน (ไม่ใช่บาทตายตัว — พืชราคาถูกจะเกินจริง) แล้วค่อยลดช่องว่างลง
       const prevAsk = s.asks[s.asks.length - 1];
       let ask =
         s.leakBlocked && s.lastAttempt !== undefined
           ? s.lastAttempt
           : prevAsk === undefined
-          ? Math.max(minPass + 0.3, (median ?? s.price) + 0.9, s.price + 0.3)
+          ? Math.max(minPass * 1.02, (median ?? s.price) * 1.05, s.price * 1.03)
+          : s.objection === 'unrealistic_ask'
+          ? Math.max(minPass, s.price + (prevAsk - s.price) * 0.4)
           : Math.max(minPass, s.price + 0.05, s.price + (prevAsk - s.price) * 0.7);
       ask = r2(Math.ceil(ask * 100 - 1e-6) / 100);
 
-      const other = bestOther(s);
+      const move = this.useEvidence ? this.pickMove(s, sessions, median, contest, prevAsk === undefined) : { strategy: contest ? 'contest_deduction' : prevAsk === undefined ? 'anchor' : 'final_push', ids: [] as string[], why: 'เจรจาด้วยตัวเลขอย่างเดียว (baseline)' };
+      const said = move.ids.map((id) => this.evidence.get(id)).filter((l): l is string => !!l && !/^E-/.test(l));
       const parts = [
-        s.leakBlocked ? `กลุ่มเรามี${crop} ปริมาณมาก ส่งมอบพร้อมกัน` : `กลุ่มเรามี${crop} รวม ${kg} กก. ส่งมอบพร้อมกัน`,
-        median && !s.leakBlocked ? `ราคากลางตลาดวันนี้ ${fmt(median)} บาท/กก. (NABC)` : '',
-        other ? 'ตอนนี้มีข้อเสนอจากผู้ซื้อรายอื่นที่ให้ราคาสุทธิดีกว่า' : '',
+        move.strategy === 'address_objection' || move.strategy === 'conditional_concession' ? OBJECTION_REPLY[s.objection ?? ''] ?? '' : '',
+        ...said,
         `ขอเสนอ ${fmt(ask)} บาท/กก.`,
         contest ? 'และขอให้วัดความชื้นจริงต่อหน้าตัวแทนกลุ่มแทนการหักเหมา' : '',
       ].filter(Boolean);
       actions.push(
         this.use('submit_counter', {
           session_id: s.id,
+          strategy: move.strategy,
+          rationale: move.why,
+          evidence_ids: move.ids,
           price_per_kg: ask,
           ...(contest ? { contest_deductions: ['หักความชื้น'] } : {}),
-          message: parts.join(' '),
+          message: s.leakBlocked ? `ขอเสนอ ${fmt(ask)} บาท/กก.` : parts.join(' '),
         }),
       );
       notes.push(`${s.buyer}: ตอนนี้ ${fmt(s.price)} → เสนอ ${fmt(ask)}${contest ? ' + ขอลดหักความชื้น' : ''}`);
@@ -242,6 +308,30 @@ export class RuleBasedMockLlm implements LlmClient {
       return [{ text: notes.join('\n') || 'ประเมินข้อเสนอที่เหลือ' }, ...sessions.filter((s) => !isDone(s)).map((s) => this.use('evaluate_offer', { session_id: s.id }))];
     }
     return [{ text: `ประเมินใหม่:\n${notes.join('\n')}` }, ...actions];
+  }
+
+  private get useEvidence() {
+    return this.opts.useEvidence !== false;
+  }
+
+  /** เลือกกลยุทธ์และหลักฐานให้ตรงข้อโต้แย้งล่าสุดของผู้ซื้อ และไม่ใช้หลักฐานซ้ำ */
+  private pickMove(s: SessionView, all: SessionView[], median: number | undefined, contest: boolean, opening: boolean): { strategy: string; ids: string[]; why: string } {
+    const has = (id: string) => this.evidence.has(id) && !s.cited.has(id);
+    const marketStrong = median !== undefined && median > s.price && this.evidence.has('E-MKT-MEDIAN');
+    const better = all.find((o) => o.id !== s.id && o.evaluation && s.evaluation && o.evaluation.netPerKgAvg > s.evaluation.netPerKgAvg && this.evidence.has(`E-COMP-${o.buyerId}`));
+    const hist = this.evidence.has(`E-HIST-${s.buyerId}`) ? `E-HIST-${s.buyerId}` : undefined;
+
+    if (contest) return { strategy: 'contest_deduction', ids: ['E-GRADE'].filter(has), why: 'ส่วนหักแบบเหมาทำให้ราคาสุทธิต่ำกว่าราคาหน้ามาก ต่อรองส่วนหักก่อนขึ้นราคา' };
+    if (opening) {
+      if (better) return { strategy: 'competitive_leverage', ids: [`E-COMP-${better.buyerId}`, 'E-VOL'].filter(has), why: 'มีข้อเสนอจริงจากรายอื่นที่ราคาสุทธิดีกว่า ใช้เป็นแรงต่อรองพร้อมปริมาณรวม' };
+      return { strategy: 'anchor', ids: [...(marketStrong ? ['E-MKT-MEDIAN'] : []), 'E-VOL'].filter(has), why: marketStrong ? 'ราคาตลาดสูงกว่าที่ผู้ซื้อเสนอ เปิดราคาสูงกว่าเป้าโดยอ้างราคาตลาดและปริมาณรวม' : 'ราคาตลาดไม่ได้สูงกว่าข้อเสนอ จึงเปิดราคาโดยอ้างปริมาณรวมแทน' };
+    }
+    const want = OBJECTION_EVIDENCE[s.objection ?? ''];
+    const target = want === 'market' ? (marketStrong ? 'E-MKT-MEDIAN' : undefined) : want === 'competing' ? (better ? `E-COMP-${better.buyerId}` : undefined) : want === 'history' ? hist : want;
+    if (target && has(target)) return { strategy: 'address_objection', ids: [target], why: `ผู้ซื้อกังวลเรื่อง ${s.objection} ตอบด้วยหลักฐานที่ตรงข้อกังวลโดยตรง` };
+    const fresh = [...(marketStrong ? ['E-MKT-MEDIAN'] : []), 'E-VOL', 'E-GRADE', 'E-DELIVERY', 'E-LOGISTICS', ...(hist ? [hist] : []), ...(better ? [`E-COMP-${better.buyerId}`] : [])].find(has);
+    if (fresh) return { strategy: 'evidence_value', ids: [fresh], why: 'ข้อโต้แย้งนี้ไม่มีหลักฐานตรง ใช้หลักฐานใหม่ที่ยังไม่ได้อ้าง แทนการพูดเหตุผลเดิม' };
+    return { strategy: s.objection === 'price_above_budget' ? 'conditional_concession' : 'final_push', ids: [], why: 'ใช้หลักฐานครบแล้ว ลดช่องว่างราคาลงเพื่อปิดดีลก่อนหมดรอบ' };
   }
 
   private summary(best: SessionView, all: SessionView[], median?: number): string {

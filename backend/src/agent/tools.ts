@@ -8,7 +8,9 @@ import { activeMembers } from '../core/grouping.js';
 import type { Deduction, DealTerms, Farmer, Group, Listing } from '../core/types.js';
 import type { MarketReference } from '../market/nabcClient.js';
 import type { KnowledgeIndex } from '../rag/search.js';
-import { checkCounterPrice, checkMessageLeak, type GuardrailViolation } from './guardrails.js';
+import { checkCounterPrice, checkMessageLeak, extractNumbers, type GuardrailViolation } from './guardrails.js';
+import { dateNumbers, EvidenceRegistry, STRATEGIES, thaiDay, unverifiedNumbers, type Evidence, type Strategy } from './evidence.js';
+import { CROP_LABEL_TH } from '../data/synthetic.js';
 import type { ToolSpec } from './llm/types.js';
 import { planTrips } from './transport.js';
 
@@ -16,10 +18,26 @@ export interface MarketProvider {
   getReference(crop: Group['crop'], date: string, province?: string): Promise<MarketReference | undefined>;
 }
 
+/** ผลการเจรจาที่ระบบเคยบันทึกไว้กับผู้ซื้อรายหนึ่ง (จากดีลก่อน ๆ) */
+export interface HistoryRecord {
+  dealId: string;
+  at: string;
+  openingPerKg: number;
+  finalPerKg: number;
+  decision: string;
+  chosen: boolean;
+}
+
+export interface HistoryProvider {
+  forBuyer(buyerId: string, crop: Group['crop']): Promise<HistoryRecord[]>;
+}
+
 export interface AgentDeps {
   buyers: MockBuyerApi;
   market: MarketProvider;
   knowledge: KnowledgeIndex;
+  /** ประวัติการเจรจาจริงในระบบ (ไม่บังคับ — ถ้าไม่มี tool จะตอบว่ายังไม่มีประวัติ) */
+  history?: HistoryProvider;
 }
 
 export interface NegotiationInput {
@@ -41,6 +59,8 @@ export interface BuyerSession {
   history: BuyerResponse[];
   /** ผู้ซื้อถอนตัว/ปิดรอบ */
   closed: boolean;
+  /** กลยุทธ์และหลักฐานที่ใช้แต่ละรอบ (ไว้เตือนเมื่อใช้เหตุผลซ้ำ) */
+  moves: { strategy: Strategy; evidenceIds: string[] }[];
 }
 
 export type Terminal =
@@ -83,11 +103,70 @@ export class NegotiationState {
   readonly members;
   readonly trips;
   readonly maxRoundsPerBuyer: number;
+  readonly evidence = new EvidenceRegistry();
+  /** จำนวนครั้งที่ใช้แต่ละกลยุทธ์ (ตัวชี้วัด) */
+  readonly strategyCounts: Partial<Record<Strategy, number>> = {};
+  /** ใช้เหตุผลชุดเดิมซ้ำกับผู้ซื้อรายเดิมกี่ครั้ง (ตัวชี้วัด) */
+  repeatedMoves = 0;
 
   constructor(readonly input: NegotiationInput) {
     this.members = activeMembers(input.group).map((m) => ({ farmerId: m.farmerId, quantityKg: m.quantityKg }));
     this.trips = planTrips(this.members, input.farmers);
     this.maxRoundsPerBuyer = input.maxRoundsPerBuyer ?? 5;
+    this.addBaseEvidence();
+  }
+
+  /** ข้อเท็จจริงของกลุ่มที่มีตั้งแต่ต้น (จากข้อมูลที่เกษตรกรลงทะเบียน — ไม่มีราคาขั้นต่ำ) */
+  private addBaseEvidence() {
+    const g = this.input.group;
+    const src = 'ข้อมูลกลุ่มที่เกษตรกรลงทะเบียน';
+    const routes = new Set(this.trips.map((t) => t.id)).size;
+    const [from, to] = [g.deliveryWindow.from, g.deliveryWindow.to];
+    const day = (iso: string) => Number(iso.slice(8, 10));
+    this.evidence.add({ id: 'E-VOL', kind: 'volume', label: `ปริมาณรวม ${this.totalKg.toLocaleString('en-US')} กก. (${(this.totalKg / 1000).toLocaleString('en-US')} ตัน) จาก ${this.members.length} ราย ส่งเป็นล็อตเดียว`, say: `กลุ่มเรามีปริมาณรวม ${this.totalKg.toLocaleString('en-US')} กก. ส่งเป็นล็อตเดียว`, value: this.totalKg, unit: 'กก.', verified: true, source: src, tag: 'volume', extraNumbers: [this.members.length] });
+    this.evidence.add({ id: 'E-GRADE', kind: 'grade', label: `${CROP_LABEL_TH[g.crop]} เกรด ${g.grade} ทุกราย (ตามที่เกษตรกรแจ้ง ยังไม่ได้ตรวจโดยบุคคลที่สาม)`, say: `ผลผลิตเกรด ${g.grade} ทุกราย ยินดีให้ตรวจคุณภาพก่อนรับ`, verified: true, source: src, tag: 'quality_grade' });
+    this.evidence.add({ id: 'E-DELIVERY', kind: 'delivery', label: `ส่งมอบได้ ${thaiDay(from)}${from === to ? '' : ` – ${thaiDay(to)}`} ${from.slice(0, 4)}`, say: 'ส่งมอบได้ตามช่วงที่ตกลง พร้อมนัดวันชัดเจน', verified: true, source: src, tag: 'delivery_ready', extraNumbers: [day(from), day(to), Number(from.slice(0, 4)), Number(from.slice(0, 4)) + 543] });
+    this.evidence.add({ id: 'E-LOGISTICS', kind: 'logistics', label: `จัดรถรวม ${this.trips.length} เที่ยว จาก ${routes} เส้นทาง (ผู้ซื้อไม่ต้องรับทีละแปลง)`, say: 'เราจัดรถรวมส่งให้ ผู้ซื้อไม่ต้องรับทีละแปลง', value: this.trips.length, verified: true, source: 'แผนขนส่งของระบบ', tag: 'consolidated_logistics', extraNumbers: [routes] });
+  }
+
+  /** บันทึกข้อเสนอของผู้ซื้อเป็นหลักฐาน และอัปเดตหลักฐาน "ข้อเสนอของรายอื่น" */
+  recordOffer(s: BuyerSession, r: BuyerResponse): Evidence {
+    const extra = [r.paymentTermDays, ...r.deductions.map((d) => (d.kind === 'percent' ? d.percent : d.kind === 'per_kg' ? d.amountPerKg : d.amount))];
+    const e = this.evidence.add({ id: `E-OFFER-${s.buyerId}-${r.round}`, kind: 'buyer_offer', label: `${s.buyerName} รอบ ${r.round}: ${r.pricePerKg.toFixed(2)} บาท/กก.${r.deductions.length ? ` (${r.deductions.map(describeDeduction).join(', ')})` : ''}`, value: r.pricePerKg, verified: true, source: 'ข้อเสนอของผู้ซื้อในการเจรจานี้', extraNumbers: [...extra, r.round] });
+    this.refreshCompetition();
+    return e;
+  }
+
+  /** หลักฐาน "ข้อเสนอของรายอื่น" ที่อ้างกับผู้ซื้อรายนี้ได้จริง (รายอื่นให้ราคาสุทธิสูงกว่า) */
+  leverageFor(s: BuyerSession): Evidence[] {
+    const own = this.evaluate(s).netPerKgAvg;
+    return [...this.sessions.values()]
+      .filter((o) => o !== s && o.last.decision !== 'walk_away' && this.evaluate(o).netPerKgAvg > own)
+      .flatMap((o) => this.evidence.get(`E-COMP-${o.buyerId}`) ?? []);
+  }
+
+  /** ข้อเสนอปัจจุบันของผู้ซื้อแต่ละรายใช้อ้างกับรายอื่นได้ (ห้ามระบุชื่อ เพื่อไม่ละเมิดความลับทางการค้า) */
+  refreshCompetition() {
+    for (const s of this.sessions.values()) {
+      const id = `E-COMP-${s.buyerId}`;
+      if (s.last.decision === 'walk_away') {
+        this.evidence.remove(id);
+        continue;
+      }
+      const ev = this.evaluate(s);
+      this.evidence.add({
+        id,
+        kind: 'competing',
+        label: `มีผู้ซื้อรายอื่นเสนอ ${ev.pricePerKg.toFixed(2)} บาท/กก.${ev.deductions.length ? ` (${ev.deductions.join(', ')})` : ''} ราคาสุทธิเฉลี่ย ${ev.netPerKgAvg.toFixed(2)} บาท/กก. — อ้างได้กับผู้ซื้อที่ให้ราคาสุทธิต่ำกว่านี้เท่านั้น`,
+        say: `ตอนนี้มีผู้ซื้อรายอื่นเสนอ ${ev.pricePerKg.toFixed(2)} บาท/กก.${ev.deductions.length ? ` (${ev.deductions.join(', ')})` : ''}`,
+        value: ev.pricePerKg,
+        verified: true,
+        source: 'ข้อเสนอจริงในการเจรจานี้',
+        tag: 'competing_offer',
+        excludeBuyerId: s.buyerId,
+        extraNumbers: [ev.netPerKgAvg],
+      });
+    }
   }
 
   get totalKg() {
@@ -125,13 +204,22 @@ export class NegotiationState {
   }
 
   /** ตัวเลขสาธารณะที่ได้จาก tool อยู่แล้ว (ราคาตลาด, ราคาที่ผู้ซื้อเสนอ, ปริมาณ) — พูดถึงได้ ไม่ถือว่าหลุด */
-  publicNumbers(): number[] {
+  publicNumbers(to?: BuyerSession): number[] {
     const nums = [this.totalKg];
     if (this.market) {
       nums.push(this.market.minPerKg, this.market.maxPerKg, this.market.medianPerKg, ...this.market.provinceQuotes.map((q) => q.pricePerKg));
     }
-    for (const s of this.sessions.values()) nums.push(...s.history.map((h) => h.pricePerKg));
-    return nums;
+    // ข้อเสนอของผู้ซื้อรายนี้เองยกเว้นได้ (เขาพูดเอง) ส่วนข้อเสนอของรายอื่นไม่ยกเว้น
+    for (const s of this.sessions.values()) if (!to || s === to) nums.push(...s.history.map((h) => h.pricePerKg));
+    // ไม่ยกเว้น: ความรู้จำลอง (RAG) และข้อเสนอของผู้ซื้อรายอื่น — ถ้าตัวเลขบังเอิญตรงกับราคาขั้นต่ำ ให้บล็อกไว้ก่อน
+    // (ผู้ซื้อไม่ควรได้รับตัวเลขใดที่ตรงกับราคาขั้นต่ำเลย ไม่ว่าตัวเลขนั้นจะมาจากไหน)
+    const fromEvidence = new EvidenceRegistry();
+    for (const e of this.evidence.list()) {
+      if (e.kind === 'knowledge' || e.kind === 'competing') continue;
+      if (to && e.kind === 'buyer_offer' && !e.id.startsWith(`E-OFFER-${to.buyerId}-`)) continue;
+      fromEvidence.add(e);
+    }
+    return [...nums, ...fromEvidence.numbers(false)];
   }
 
   /** ตัวเลขที่ห้ามหลุดไปถึงผู้ซื้อ */
@@ -163,6 +251,11 @@ export const TOOL_SPECS: ToolSpec[] = [
     },
   },
   {
+    name: 'get_negotiation_history',
+    description: 'ดูผลการเจรจาที่ระบบเคยบันทึกไว้กับผู้ซื้อรายนี้ (ราคาเปิด ราคาสุดท้าย ผล) ถ้ามี จะได้หลักฐาน E-HIST ไว้อ้าง ถ้าไม่มีประวัติ ห้ามอ้างว่าเคยซื้อขายกัน',
+    inputSchema: { json: { type: 'object', properties: { buyer_id: { type: 'string' } }, required: ['buyer_id'] } },
+  },
+  {
     name: 'list_buyers',
     description: 'รายชื่อผู้ซื้อที่รับพืช เกรด และปริมาณของกลุ่มนี้',
     inputSchema: { json: { type: 'object', properties: {} } },
@@ -180,17 +273,22 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: 'submit_counter',
     description:
-      'ยื่นข้อเสนอโต้กลับให้ผู้ซื้อ ระบุราคาต่อกก. และขอให้ลดส่วนหักได้ (contest_deductions เช่น ["หักความชื้น"]) พร้อมข้อความภาษาไทยถึงผู้ซื้อ ห้ามใส่ราคาขั้นต่ำของกลุ่มในข้อความ ระบบจะบล็อกราคาที่ต่ำกว่าขั้นต่ำ',
+      'ยื่นข้อเสนอโต้กลับให้ผู้ซื้อ 1 รอบ: เลือกกลยุทธ์ เหตุผลสั้น ๆ หลักฐานที่อ้าง (evidence_ids จากผล tool) ราคาต่อกก. และข้อความภาษาไทยถึงผู้ซื้อ ' +
+      'ผู้ซื้อตัดสินใจจาก "หลักฐาน" ที่อ้าง ไม่ใช่คำพูด — หลักฐานที่ตรงข้อกังวลของผู้ซื้อมีน้ำหนักมากที่สุด เหตุผลซ้ำมีน้ำหนักน้อยลง ' +
+      'ตัวเลขในข้อความต้องมาจากหลักฐานหรือราคาที่เสนอเท่านั้น ห้ามใส่ราคาขั้นต่ำ ระบบจะบล็อกราคาที่ต่ำกว่าขั้นต่ำ',
     inputSchema: {
       json: {
         type: 'object',
         properties: {
           session_id: { type: 'string' },
+          strategy: { type: 'string', enum: [...STRATEGIES], description: 'กลยุทธ์ของรอบนี้' },
+          rationale: { type: 'string', description: 'เหตุผลสั้น ๆ 1–2 ประโยคว่าทำไมเลือกกลยุทธ์และราคานี้ (แสดงบนหน้าเว็บ ไม่ส่งให้ผู้ซื้อ)' },
+          evidence_ids: { type: 'array', items: { type: 'string' }, description: 'รหัสหลักฐานที่อ้าง เช่น ["E-MKT-MEDIAN","E-VOL"]' },
           price_per_kg: { type: 'number' },
           contest_deductions: { type: 'array', items: { type: 'string' } },
-          message: { type: 'string', description: 'ข้อความถึงผู้ซื้อ ให้เหตุผลจากราคาตลาด ปริมาณ และคุณภาพ' },
+          message: { type: 'string', description: 'ข้อความถึงผู้ซื้อ ตอบข้อโต้แย้งล่าสุดของผู้ซื้อด้วยหลักฐานที่อ้าง' },
         },
-        required: ['session_id', 'price_per_kg', 'message'],
+        required: ['session_id', 'strategy', 'rationale', 'evidence_ids', 'price_per_kg', 'message'],
       },
     },
   },
@@ -243,8 +341,16 @@ export async function executeTool(
     case 'get_market_price': {
       const ref = await deps.market.getReference(group.crop, st.input.date, group.province);
       st.market = ref ?? null;
-      if (!ref) return { available: false, note: 'ไม่มีราคาอ้างอิงจาก NABC สำหรับพืชนี้ ให้ใช้ search_knowledge' };
+      if (!ref) return { available: false, note: 'ไม่มีราคาอ้างอิงจาก NABC สำหรับพืชนี้ ห้ามอ้างราคาตลาดเป็นตัวเลข ใช้หลักฐานอื่น (ปริมาณ คุณภาพ การส่งมอบ ข้อเสนอของรายอื่น)' };
+      const src = `${ref.source} ${ref.date}${ref.stale ? ' (ข้อมูลวันก่อนหน้า)' : ''}`;
+      const added = [
+        st.evidence.add({ id: 'E-MKT-MEDIAN', kind: 'market', label: `ราคากลางตลาด (NABC) ${ref.medianPerKg.toFixed(2)} บาท/กก. ช่วง ${ref.minPerKg.toFixed(2)}–${ref.maxPerKg.toFixed(2)} จาก ${ref.quotes.length} แหล่ง ${src}`, say: `ราคากลางตลาดจาก NABC อยู่ที่ ${ref.medianPerKg.toFixed(2)} บาท/กก.`, value: ref.medianPerKg, verified: true, source: src, tag: 'market_reference', extraNumbers: [ref.minPerKg, ref.maxPerKg, ref.quotes.length, ...dateNumbers(ref.date)] }),
+        ...ref.provinceQuotes.slice(0, 3).map((q, i) =>
+          st.evidence.add({ id: `E-MKT-LOCAL-${i + 1}`, kind: 'market', label: `ราคาที่ ${q.market} (${q.province}) ${q.pricePerKg.toFixed(2)} บาท/กก. ${src}`, say: `ราคาในจังหวัด ${q.province} จาก NABC อยู่ที่ ${q.pricePerKg.toFixed(2)} บาท/กก.`, value: q.pricePerKg, verified: true, source: src, tag: 'market_reference', extraNumbers: dateNumbers(ref.date) }),
+        ),
+      ];
       return {
+        evidence: st.evidence.brief(added),
         available: true,
         source: ref.source,
         date: ref.date,
@@ -264,7 +370,29 @@ export async function executeTool(
       st.searches += 1;
       const buyer = typeof input.buyer_id === 'string' && input.buyer_id ? input.buyer_id : undefined;
       const r = deps.knowledge.search(str(input.query, 'query'), { topK: 3, filter: { crop: group.crop, ...(buyer ? { buyer } : {}) } });
-      return { mode: r.mode, results: r.hits.map((h) => ({ source: `${h.source} › ${h.heading}`, text: h.text, disclaimer: h.disclaimer })) };
+      const added = r.hits.map((h, i) =>
+        st.evidence.add({ id: `E-KB-${st.searches}-${i + 1}`, kind: 'knowledge', label: `${h.source} › ${h.heading}`, verified: false, source: h.source, extraNumbers: extractNumbers(h.text) }),
+      );
+      return { mode: r.mode, evidence: st.evidence.brief(added), results: r.hits.map((h, i) => ({ evidence_id: added[i]!.id, source: `${h.source} › ${h.heading}`, text: h.text, disclaimer: h.disclaimer })) };
+    }
+
+    case 'get_negotiation_history': {
+      const buyerId = str(input.buyer_id, 'buyer_id');
+      const records = (await deps.history?.forBuyer(buyerId, group.crop)) ?? [];
+      if (!records.length) return { buyer_id: buyerId, records: [], note: 'ยังไม่มีประวัติการเจรจากับผู้ซื้อรายนี้ในระบบ ห้ามอ้างว่าเคยซื้อขายกัน' };
+      const last = records[0]!;
+      const e = st.evidence.add({
+        id: `E-HIST-${buyerId}`,
+        kind: 'history',
+        label: `ครั้งล่าสุดที่ระบบบันทึก (${last.at.slice(0, 10)}) ผู้ซื้อรายนี้ให้ราคาสุดท้าย ${last.finalPerKg.toFixed(2)} บาท/กก.`,
+        say: `ครั้งก่อนเราตกลงกันที่ ${last.finalPerKg.toFixed(2)} บาท/กก.`,
+        value: last.finalPerKg,
+        verified: true,
+        source: 'บันทึกการเจรจาในระบบ',
+        tag: 'buyer_history',
+        extraNumbers: [...records.flatMap((r) => [r.openingPerKg, r.finalPerKg]), ...dateNumbers(last.at)],
+      });
+      return { buyer_id: buyerId, evidence: st.evidence.brief([e]), records: records.slice(0, 5) };
     }
 
     case 'list_buyers': {
@@ -289,13 +417,17 @@ export async function executeTool(
         throw e;
       }
       const name = deps.buyers.listBuyers(group.crop, group.grade, st.totalKg).find((b) => b.id === buyerId)?.name ?? buyerId;
-      st.sessions.set(res.sessionId, { sessionId: res.sessionId, buyerId, buyerName: name, last: res, rounds: 0, history: [res], closed: false });
+      const sess: BuyerSession = { sessionId: res.sessionId, buyerId, buyerName: name, last: res, rounds: 0, history: [res], closed: false, moves: [] };
+      st.sessions.set(res.sessionId, sess);
+      const offerEv = st.recordOffer(sess, res);
       trace('buyer_response', { ...res, buyerName: name });
-      return { session_id: res.sessionId, buyer: name, decision: res.decision, pricePerKg: res.pricePerKg, deductions: res.deductions.map(describeDeduction), paymentTermDays: res.paymentTermDays, message: res.message };
+      return { session_id: res.sessionId, buyer: name, decision: res.decision, pricePerKg: res.pricePerKg, deductions: res.deductions.map(describeDeduction), paymentTermDays: res.paymentTermDays, message: res.message, evidence: st.evidence.brief([offerEv]) };
     }
 
     case 'evaluate_offer': {
-      return st.evaluate(session(input.session_id));
+      const s = session(input.session_id);
+      const leverage = st.leverageFor(s);
+      return { ...st.evaluate(s), ...(leverage.length ? { leverage: st.evidence.brief(leverage) } : {}) };
     }
 
     case 'submit_counter': {
@@ -304,26 +436,56 @@ export async function executeTool(
       const price = Number(input.price_per_kg);
       const message = typeof input.message === 'string' ? input.message : '';
       const contest = Array.isArray(input.contest_deductions) ? input.contest_deductions.filter((x): x is string => typeof x === 'string') : [];
+      const strategy = input.strategy as Strategy;
+      if (!STRATEGIES.includes(strategy)) throw new ToolError(`strategy ต้องเป็นหนึ่งใน ${STRATEGIES.join(', ')}`);
+      const rationale = str(input.rationale, 'rationale').slice(0, 300);
+      const evidenceIds = [...new Set((Array.isArray(input.evidence_ids) ? input.evidence_ids : []).filter((x): x is string => typeof x === 'string'))];
+      const unknown = evidenceIds.filter((id) => !st.evidence.get(id));
+      if (unknown.length) {
+        throw new ToolError(`ไม่พบหลักฐาน ${unknown.join(', ')} — อ้างได้เฉพาะ: ${st.evidence.list().map((e) => e.id).join(', ')}`);
+      }
+      // อ้างข้อเสนอของรายอื่นได้เฉพาะเมื่อดีกว่าจริง (ราคาสุทธิสูงกว่า) และไม่ใช่ข้อเสนอของผู้ซื้อรายนี้เอง
+      const ownEval = st.evaluate(s);
+      for (const id of evidenceIds) {
+        const e = st.evidence.get(id)!;
+        if (e.kind !== 'competing') continue;
+        const other = [...st.sessions.values()].find((x) => x.buyerId === e.excludeBuyerId);
+        if (e.excludeBuyerId === s.buyerId || !other || st.evaluate(other).netPerKgAvg <= ownEval.netPerKgAvg) {
+          throw new ToolError(`อ้าง ${id} กับผู้ซื้อรายนี้ไม่ได้ เพราะข้อเสนอนั้นไม่ได้ให้ราคาสุทธิดีกว่าข้อเสนอของรายนี้ (ห้ามหลอกผู้ซื้อ)`);
+        }
+      }
 
       // floor ภายใต้ส่วนหักปัจจุบัน (ระมัดระวัง: ยังไม่นับส่วนหักที่ขอลด เพราะผู้ซื้ออาจไม่ยอม)
-      const ev = st.evaluate(s);
-      const violation =
+      const allowed = [price, ...st.publicNumbers(s)];
+      let violation =
         checkCounterPrice({
           pricePerKg: price,
-          minGrossPriceToPassAll: ev.minGrossPriceToPassAll,
+          minGrossPriceToPassAll: ownEval.minGrossPriceToPassAll,
           buyerCurrentPerKg: s.last.pricePerKg,
           roundsUsed: s.rounds,
           maxRounds: st.maxRoundsPerBuyer,
-        }) ?? checkMessageLeak(message, st.privateNumbers(), [price, ...st.publicNumbers()]);
+        }) ?? checkMessageLeak(message, st.privateNumbers(), allowed);
+      if (!violation) {
+        const bad = unverifiedNumbers(extractNumbers(message), [...allowed, ...st.evidence.numbers()]);
+        if (bad.length) {
+          violation = { code: 'unverified_number', message: `ข้อความมีตัวเลข ${bad.join(', ')} ที่ไม่มีในหลักฐาน ห้ามแต่งตัวเลข ใช้เฉพาะตัวเลขจากหลักฐานที่อ้าง หรือเขียนโดยไม่ระบุตัวเลข` };
+        }
+      }
       if (violation) {
         st.violations.push(violation);
-        trace('guardrail_blocked', { buyerId: s.buyerId, attemptedPricePerKg: price, code: violation.code, reason: violation.message });
+        trace('guardrail_blocked', { buyerId: s.buyerId, attemptedPricePerKg: price, code: violation.code, reason: violation.message, strategy });
         return { blocked: true, code: violation.code, reason: violation.message };
       }
 
+      const prevMove = s.moves.at(-1);
+      const repeated = !!prevMove && prevMove.strategy === strategy && prevMove.evidenceIds.join() === [...evidenceIds].sort().join();
+      if (repeated) st.repeatedMoves += 1;
+      s.moves.push({ strategy, evidenceIds: [...evidenceIds].sort() });
+      st.strategyCounts[strategy] = (st.strategyCounts[strategy] ?? 0) + 1;
+
       let res: BuyerResponse;
       try {
-        res = deps.buyers.submitCounter(s.sessionId, { pricePerKg: price, contestDeductions: contest, message });
+        res = deps.buyers.submitCounter(s.sessionId, { pricePerKg: price, contestDeductions: contest, message, arguments: st.evidence.claims(evidenceIds) });
       } catch (e) {
         if (e instanceof MockBuyerError) {
           s.closed = true;
@@ -331,11 +493,22 @@ export async function executeTool(
         }
         throw e;
       }
-      trace('counter_sent', { buyerId: s.buyerId, pricePerKg: price, contestDeductions: contest, message });
+      const cited = evidenceIds.map((id) => st.evidence.get(id)!);
+      trace('counter_sent', {
+        buyerId: s.buyerId,
+        pricePerKg: price,
+        contestDeductions: contest,
+        message,
+        strategy,
+        rationale,
+        evidence: cited.map((e) => ({ id: e.id, label: e.label, verified: e.verified })),
+        round: s.rounds + 1,
+      });
       s.rounds += 1;
       s.last = res;
       s.history.push(res);
       if (res.decision === 'walk_away' || res.decision === 'accept') s.closed = true;
+      const offerEv = st.recordOffer(s, res);
       trace('buyer_response', { ...res, buyerName: s.buyerName });
       return {
         buyer: s.buyerName,
@@ -343,8 +516,13 @@ export async function executeTool(
         pricePerKg: res.pricePerKg,
         deductions: res.deductions.map(describeDeduction),
         message: res.message,
+        ...(res.objection ? { objection: res.objection } : {}),
+        ...(res.acknowledged ? { acknowledged: res.acknowledged } : {}),
+        ...(repeated ? { warning: 'ใช้กลยุทธ์และหลักฐานชุดเดิมกับรอบก่อน ผู้ซื้อให้น้ำหนักน้อยลง ลองตอบข้อโต้แย้งล่าสุดด้วยหลักฐานอื่น' } : {}),
         roundsUsed: s.rounds,
         roundsLeft: Math.max(0, st.maxRoundsPerBuyer - s.rounds),
+        evidence: st.evidence.brief([offerEv]),
+        ...(st.leverageFor(s).length ? { leverage: st.evidence.brief(st.leverageFor(s)) } : {}),
         evaluation: st.evaluate(s),
       };
     }

@@ -6,6 +6,7 @@ export type GuardrailCode =
   | 'below_buyer_offer' // เสนอต่ำกว่าที่ผู้ซื้อให้อยู่แล้ว (ผู้ซื้อจะรับทันที = เสียเงินฟรี)
   | 'private_data_leak' // ข้อความมีตัวเลขราคาขั้นต่ำ
   | 'round_limit' // เจรจากับผู้ซื้อรายนี้ครบจำนวนรอบแล้ว
+  | 'unverified_number' // ข้อความมีตัวเลขที่ไม่มีในทะเบียนหลักฐาน (กันแต่งสถิติ/ราคาคู่แข่ง)
   | 'invalid_input';
 
 export interface GuardrailViolation {
@@ -30,7 +31,7 @@ export function checkMessageLeak(message: string, privateNumbers: number[], allo
   for (const n of extractNumbers(message)) {
     if (allowed.some((a) => near(a, n))) continue;
     if (privateNumbers.some((p) => near(p, n))) {
-      return { code: 'private_data_leak', message: 'ข้อความมีตัวเลขที่ตรงกับราคาขั้นต่ำของกลุ่ม ห้ามเปิดเผยให้ผู้ซื้อ เขียนข้อความใหม่โดยไม่ระบุตัวเลขนั้น' };
+      return { code: 'private_data_leak', message: 'ข้อความมีตัวเลขที่ตรงกับราคาขั้นต่ำของสมาชิก (แม้จะมาจากแหล่งอื่น) ระบบไม่ส่งตัวเลขนี้ เพื่อไม่ให้ผู้ซื้อเดาราคาขั้นต่ำได้ เขียนข้อความใหม่โดยไม่ระบุตัวเลขนั้น' };
     }
   }
   return undefined;

@@ -48,6 +48,15 @@ export interface AgentMetrics {
   /** ราคาสุทธิเฉลี่ยที่ได้เพิ่มจากข้อเสนอแรกที่ดีที่สุด */
   upliftVsBestOpeningPerKg?: number;
   upliftVsBestOpeningBaht?: number;
+  /** ราคาสุทธิเฉลี่ยที่ได้เพิ่มจากข้อเสนอแรกของผู้ซื้อรายที่เลือก */
+  upliftVsChosenOpeningPerKg?: number;
+  upliftVsChosenOpeningBaht?: number;
+  /** กลยุทธ์ที่ใช้และจำนวนครั้ง */
+  strategies?: Record<string, number>;
+  /** ใช้เหตุผลชุดเดิมซ้ำกับผู้ซื้อรายเดิม */
+  repeatedMoves?: number;
+  /** ข้อความที่ถูกบล็อกเพราะมีตัวเลขที่ไม่มีหลักฐาน */
+  unverifiedNumberBlocks?: number;
 }
 
 export type AgentOutcome = Terminal | { kind: 'failed'; reason: string };
@@ -259,6 +268,8 @@ function buildMetrics(
   const openings: OfferEvaluation[] = sessions.map((s) => st.evaluate(s, { pricePerKg: s.history[0]!.pricePerKg, deductions: s.history[0]!.deductions }));
   const bestOpening = openings.filter((o) => o.passesAllFloors).sort((a, b) => b.netPerKgAvg - a.netPerKgAvg)[0] ?? openings.sort((a, b) => b.netPerKgAvg - a.netPerKgAvg)[0];
   const final = outcome.kind === 'prepared' ? outcome.evaluation : undefined;
+  const chosen = outcome.kind === 'prepared' ? st.sessions.get(outcome.sessionId) : undefined;
+  const chosenOpening = chosen ? st.evaluate(chosen, { pricePerKg: chosen.history[0]!.pricePerKg, deductions: chosen.history[0]!.deductions }) : undefined;
   return {
     label: 'ผลทดสอบจากข้อมูลจำลอง (ไม่ใช่ผลลัพธ์จริงในตลาด)',
     ...m,
@@ -273,5 +284,11 @@ function buildMetrics(
     ...(final && bestOpening
       ? { upliftVsBestOpeningPerKg: r2(final.netPerKgAvg - bestOpening.netPerKgAvg), upliftVsBestOpeningBaht: r2(final.totalNetBaht - bestOpening.totalNetBaht) }
       : {}),
+    ...(final && chosenOpening
+      ? { upliftVsChosenOpeningPerKg: r2(final.netPerKgAvg - chosenOpening.netPerKgAvg), upliftVsChosenOpeningBaht: r2(final.totalNetBaht - chosenOpening.totalNetBaht) }
+      : {}),
+    strategies: { ...st.strategyCounts } as Record<string, number>,
+    repeatedMoves: st.repeatedMoves,
+    unverifiedNumberBlocks: st.violations.filter((v) => v.code === 'unverified_number').length,
   };
 }
