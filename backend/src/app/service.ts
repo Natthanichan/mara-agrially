@@ -62,6 +62,12 @@ export const dealListings = (d: Pick<DealRecord, 'listingOverrides'>): Listing[]
   return ov.size ? listings.map((l) => ov.get(l.farmerId) ?? l) : listings;
 };
 
+/** ราคาขั้นต่ำที่ใช้ตรวจตอนอนุมัติ: คนที่ลงมติยอมขายต่ำกว่าขั้นต่ำของตัวเองแล้ว ไม่ถูกนับว่าไม่ผ่าน */
+const effectiveListings = (d: Pick<DealRecord, 'listingOverrides' | 'floorWaivers'>): Listing[] => {
+  const waived = new Set(d.floorWaivers ?? []);
+  return dealListings(d).map((l) => (waived.has(l.farmerId) ? { ...l, floorPricePerKg: 0 } : l));
+};
+
 const groupFor = (crop: Crop, ls: Listing[] = listings, mustInclude?: string): Group => {
   const gs = groupListings(ls, farmers).filter((x) => x.crop === crop);
   if (mustInclude) {
@@ -259,7 +265,7 @@ function approvalState(deal: DealRecord, group: Group) {
   if (deal.outcome?.kind !== 'prepared') return { ok: false as const, blockedReason: 'ไม่มีดีลให้อนุมัติ' };
   const active = group.members.filter((m) => deal.approvals[m.farmerId] !== 'reject');
   const terms = { ...deal.outcome.terms, trips: planTrips(active, farmers) };
-  const floorPasses = active.length > 0 && checkPriceFloor(active, dealListings(deal), terms).passes;
+  const floorPasses = active.length > 0 && checkPriceFloor(active, effectiveListings(deal), terms).passes;
   const remainingKg = active.reduce((s, m) => s + m.quantityKg, 0);
   const minKg = buyerMinKg(deal.outcome.buyerId);
   const r = canFinalize({
@@ -299,6 +305,59 @@ export async function recordApproval(ctx: AppContext, id: string, body: { farmer
   return { status: st.ok ? 'agreed' : 'pending_approval', reason: st.blockedReason, needsRenegotiation: st.needsRenegotiation ?? false };
 }
 
+/**
+ * มติกลุ่ม (Bounded Delegated Negotiation): ข้อเสนอดีที่สุดต่ำกว่าขั้นต่ำของบางคน → น้องมะระตกลงแทนไม่ได้ ต้องให้กลุ่มลงมติ
+ * เสียงข้างมากเห็นด้วย → กลับไปให้ทุกคนกดอนุมัติตามปกติ · คนที่ไม่เห็นด้วยและราคาต่ำกว่าขั้นต่ำของตัวเอง ถอนตัวได้ (ไม่ถูกบังคับขาย)
+ * สมาชิกคนอื่นในเดโมเป็นตัวจำลอง: ผ่านขั้นต่ำ → เห็นด้วย · ต่ำกว่าขั้นต่ำไม่เกิน 3% → เห็นด้วย · มากกว่านั้น → ไม่เห็นด้วย
+ */
+export async function recordGroupVote(ctx: AppContext, id: string, farmerId: string, vote: 'yes' | 'no') {
+  const deal = await ctx.store.getDeal(id);
+  if (!deal) throw new AppError(404, `ไม่พบดีล ${id}`);
+  if (deal.groupVote) throw new AppError(409, 'กลุ่มลงมติดีลนี้ไปแล้ว');
+  const best = deal.status === 'failed' && deal.outcome?.kind === 'escalated' ? deal.outcome.bestOffer : undefined;
+  if (!best) throw new AppError(409, 'ดีลนี้ไม่มีข้อเสนอให้ลงมติ');
+  const now = (ctx.now ?? (() => new Date()))();
+  const group = groupForDeal(deal);
+  const members = group.members;
+  const terms = { ...best.terms, trips: planTrips(members, farmers) };
+  const nets = computeNetPerFarmer(members, terms);
+  const floors = new Map(dealListings(deal).map((l) => [l.farmerId, l.floorPricePerKg]));
+  const votes = members.map((m) => {
+    const net = nets.find((n) => n.farmerId === m.farmerId)!.netPerKg;
+    const floor = floors.get(m.farmerId) ?? 0;
+    const below = net < floor;
+    const v = m.farmerId === farmerId ? vote : !below || net >= floor * 0.97 ? 'yes' : 'no';
+    return { farmerId: m.farmerId, quantityKg: m.quantityKg, below, vote: v as 'yes' | 'no', simulated: m.farmerId !== farmerId };
+  });
+  for (const v of votes) await appendLedger(ctx, id, { actor: 'farmer', actorId: v.farmerId, type: 'group.vote', data: { farmerId: v.farmerId, vote: v.vote, ...(v.simulated ? { simulated: true } : {}) } }, now);
+  const yes = votes.filter((v) => v.vote === 'yes').length;
+  const no = votes.length - yes;
+  const withdrawn = votes.filter((v) => v.vote === 'no' && v.below).map((v) => v.farmerId);
+  const waivers = votes.filter((v) => v.vote === 'yes' && v.below).map((v) => v.farmerId);
+  const remainingKg = votes.filter((v) => !withdrawn.includes(v.farmerId)).reduce((s, v) => s + v.quantityKg, 0);
+  const result: 'approved' | 'rejected' | 'insufficient' = yes * 2 <= votes.length ? 'rejected' : remainingKg < buyerMinKg(best.buyerId) ? 'insufficient' : 'approved';
+  const groupVote = { yes, no, result, at: now.toISOString() };
+  await appendLedger(ctx, id, { actor: 'system', type: 'group.vote_result', data: { yes, no, result, withdrawn, waivers, pricePerKg: best.terms.pricePerKg, buyerId: best.buyerId } }, now);
+  if (result !== 'approved') {
+    await ctx.store.updateDeal(id, { groupVote, updatedAt: now.toISOString() });
+    return { result, yes, no, total: votes.length, withdrawn: withdrawn.length, userWithdrawn: withdrawn.includes(farmerId) };
+  }
+  const approvals: Record<string, ApprovalDecision> = Object.fromEntries(withdrawn.map((f) => [f, 'reject' as const]));
+  await ctx.store.updateDeal(
+    id,
+    {
+      status: 'pending_approval',
+      outcome: { kind: 'prepared', sessionId: best.sessionId, buyerId: best.buyerId, buyerName: best.buyerName, terms: best.terms, evaluation: best.evaluation, summary: `มติกลุ่ม ${yes}/${votes.length} เห็นด้วยขายให้ ${best.buyerName} ที่ ${best.terms.pricePerKg.toFixed(2)} บาท/กก.` },
+      approvals,
+      floorWaivers: waivers,
+      groupVote,
+      updatedAt: now.toISOString(),
+    },
+    'failed',
+  );
+  return { result, yes, no, total: votes.length, withdrawn: withdrawn.length, userWithdrawn: withdrawn.includes(farmerId) };
+}
+
 /** บันทึกเหตุการณ์ลง ledger (hash chain) ของรหัสใดก็ได้ — ใช้กับการเจรจาฝั่งผู้ซื้อใน LINE ด้วย */
 export const appendAudit = (ctx: AppContext, id: string, ev: { actor: LedgerEvent['actor']; actorId?: string; type: string; data: Record<string, unknown> }) =>
   appendLedger(ctx, id, ev, (ctx.now ?? (() => new Date()))());
@@ -332,6 +391,8 @@ export interface FarmerOffer {
   checks?: DealCheck[];
   /** ใบแบ่งจ่าย: ผู้ซื้อโอนตรงเข้าบัญชีเกษตรกรแต่ละคน ตามน้ำหนักที่ส่งจริง (ระบบไม่ถือเงิน) */
   payouts?: { label: string; account: string; quantityKg: number; amountBaht: number; mine: boolean }[];
+  /** ดีลนี้มาจากมติกลุ่ม */
+  groupVote?: { yes: number; no: number };
 }
 
 /** ข้อมูลดีลที่ส่งให้เกษตรกรอ่านก่อนกดอนุมัติ */
@@ -382,10 +443,11 @@ export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: stri
       deductions: st.terms.deductions,
       totalKg,
       ...(buyerCfg ? { paymentTermDays: buyerCfg.paymentTermDays, buyerMinKg: buyerCfg.minKg, buyerMaxKg: buyerCfg.maxKg } : {}),
-      passesAllFloors: checkPriceFloor(active, dealListings(deal), st.terms).passes,
+      passesAllFloors: checkPriceFloor(active, effectiveListings(deal), st.terms).passes,
       buyerLevel: rep.level,
       ledgerVerified,
     }),
+    ...(deal.groupVote ? { groupVote: { yes: deal.groupVote.yes, no: deal.groupVote.no } } : {}),
     payouts: nets.map((n, i) => ({
       label: n.farmerId === farmerId ? 'คุณ' : `สมาชิก ${i + 1}`,
       account: farmers.find((f) => f.id === n.farmerId)?.bankAccountMasked ?? '-',

@@ -107,6 +107,10 @@ export interface DealRecord {
   listingOverrides?: Listing[];
   /** รอบการเจรจาใหม่ต่อจากดีลเดิม (0 = ดีลแรก) */
   round?: number;
+  /** สมาชิกที่ลงมติยอมขายต่ำกว่าขั้นต่ำของตัวเอง (มติกลุ่ม) — ตรวจ floor ข้ามคนเหล่านี้ */
+  floorWaivers?: string[];
+  /** ผลมติกลุ่ม (เมื่อข้อเสนอดีที่สุดต่ำกว่าขั้นต่ำของบางคน) */
+  groupVote?: { yes: number; no: number; result: 'approved' | 'rejected' | 'insufficient'; at: string };
   /** URL หน้าเว็บของระบบ (จาก webhook) ไว้ทำปุ่ม "ดูการเจรจาทั้งหมด" ใน LINE */
   lineBaseUrl?: string;
 }

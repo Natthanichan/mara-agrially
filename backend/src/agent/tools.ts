@@ -68,7 +68,12 @@ export interface BuyerSession {
 
 export type Terminal =
   | { kind: 'prepared'; sessionId: string; buyerId: string; buyerName: string; terms: DealTerms; summary: string; evaluation: OfferEvaluation }
-  | { kind: 'escalated'; reason: string };
+  | {
+      kind: 'escalated';
+      reason: string;
+      /** ข้อเสนอที่ดีที่สุดที่ได้ (ต่ำกว่าขั้นต่ำของบางคน) — ให้กลุ่มลงมติได้ว่าจะขายที่ราคานี้หรือไม่ */
+      bestOffer?: { sessionId: string; buyerId: string; buyerName: string; terms: DealTerms; evaluation: OfferEvaluation };
+    };
 
 export interface OfferEvaluation {
   sessionId: string;
@@ -559,7 +564,16 @@ export async function executeTool(
             'ข้อเสนอแรกมักต่อรองได้ ให้ submit_counter กับรายที่ราคาสุทธิใกล้ขั้นต่ำที่สุดก่อน ใช้ minGrossPriceToPassAll จาก evaluate_offer เป็นเป้า (ห้ามบอกตัวเลขนี้กับผู้ซื้อ) และถ้ามีส่วนหักแบบเหมาให้ใส่ contest_deductions',
         );
       }
-      st.terminal = { kind: 'escalated', reason: str(input.reason, 'reason') };
+      // ข้อเสนอที่ดีที่สุดที่ยังไม่ถอนตัว → เก็บไว้ให้กลุ่มลงมติ (ไม่ได้ตกลงแทนใคร)
+      const best = [...st.sessions.values()]
+        .filter((x) => x.last.decision !== 'walk_away')
+        .map((x) => ({ x, ev: st.evaluate(x) }))
+        .sort((a, b) => b.ev.netPerKgAvg - a.ev.netPerKgAvg)[0];
+      st.terminal = {
+        kind: 'escalated',
+        reason: str(input.reason, 'reason'),
+        ...(best ? { bestOffer: { sessionId: best.x.sessionId, buyerId: best.x.buyerId, buyerName: best.x.buyerName, terms: st.termsOf(best.x.last), evaluation: best.ev } } : {}),
+      };
       for (const s of st.sessions.values()) deps.buyers.close(s.sessionId);
       return { escalated: true };
     }

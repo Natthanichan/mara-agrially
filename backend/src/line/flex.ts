@@ -12,7 +12,7 @@ import { FEEDBACK_TH, LEVEL_TH, type FeedbackKind } from '../core/reputation.js'
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other', 'farm_sell', 'farm_plan', 'farm_profile', 'plan_crop', 'plan_advise', 'farm_sell_profile', 'rate_buyer'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other', 'farm_sell', 'farm_plan', 'farm_profile', 'plan_crop', 'plan_advise', 'farm_sell_profile', 'rate_buyer', 'group_vote'] as const;
 export type Act = (typeof ACTS)[number];
 const CROPS: Crop[] = ALL_CROPS;
 export const postbackData = (act: Act, dealId?: string, crop?: Crop, value?: string) =>
@@ -149,6 +149,7 @@ export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string,
     row('คุณได้สุทธิ', `${baht(m.netPerKg)} บาท/กก.`, true),
     row('รวมที่คุณได้', `${baht(m.netTotal)} บาท (${qty(m.quantityKg)})`, true),
     row('ขั้นต่ำของคุณ', `${baht(m.floorPerKg)} บาท/กก. ${m.passesFloor ? '✓ ผ่าน' : '✗ ไม่ผ่าน'}`),
+    ...(o.groupVote ? [{ type: 'text', text: `🗳 ดีลนี้มาจากมติกลุ่ม (เห็นด้วย ${o.groupVote.yes} · ไม่เห็นด้วย ${o.groupVote.no}) ราคาต่ำกว่าขั้นต่ำของบางคน แต่เสียงข้างมากเห็นด้วย คุณยังกดอนุมัติหรือไม่เอาได้เอง`, size: 'xs', color: '#8F5400', wrap: true }] : []),
     ...(o.checks?.length
       ? [
           { type: 'separator' },
@@ -582,3 +583,21 @@ export function paymentSplitMessage(o: FarmerOffer): LineMessage {
     `ใบแบ่งจ่าย: ${o.buyerName} โอนตรงรายคน รวม ${int(total)} บาท`,
   );
 }
+
+// ---------- มติกลุ่ม ----------
+
+/** ข้อเสนอดีที่สุดต่ำกว่าขั้นต่ำของบางคน → น้องมะระตกลงแทนไม่ได้ ขอมติกลุ่ม */
+export const groupVoteMessage = (dealId: string, buyerName: string, pricePerKg: number, belowFloor: number, members: number): LineMessage =>
+  bubble(
+    'ขอมติกลุ่ม 🗳',
+    [
+      { type: 'text', text: `ข้อเสนอที่ดีที่สุดคือ ${buyerName} ${baht(pricePerKg)} บาท/กก.`, weight: 'bold', size: 'sm', wrap: true },
+      { type: 'text', text: `ราคานี้ทำให้สมาชิก ${belowFloor} จาก ${members} คนได้ต่ำกว่าขั้นต่ำที่ตั้งไว้ น้องมะระจึงตกลงแทนไม่ได้ ต้องให้กลุ่มลงมติก่อน`, size: 'xs', wrap: true },
+      { type: 'text', text: 'เสียงข้างมากเห็นด้วย → ทุกคนกดอนุมัติอีกครั้ง · คนที่ไม่เห็นด้วยและราคาต่ำกว่าขั้นต่ำของตัวเอง ถอนตัวได้ ไม่ถูกบังคับขาย', size: 'xs', color: '#666666', wrap: true },
+    ],
+    [
+      button('เห็นด้วย ขายที่ราคานี้', postbackData('group_vote', dealId, undefined, 'yes'), 'เห็นด้วย ขายที่ราคานี้', 'primary', '#2E7D32'),
+      button('ไม่เห็นด้วย', postbackData('group_vote', dealId, undefined, 'no'), 'ไม่เห็นด้วย', 'secondary'),
+    ],
+    `ขอมติกลุ่ม: ${buyerName} ${baht(pricePerKg)} บาท/กก. ต่ำกว่าขั้นต่ำของ ${belowFloor} คน`,
+  );

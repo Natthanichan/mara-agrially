@@ -350,6 +350,42 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     expect(msgs.flatMap(buttons).map((b) => b.label)).toContain('ต่อรองใหม่');
   });
 
+  it('ข้อเสนอดีที่สุดต่ำกว่าขั้นต่ำของบางคน → ขอมติกลุ่ม → เสียงข้างมากเห็นด้วย → การ์ดอนุมัติ (บอกว่ามาจากมติ) → ตกลง · ledger มีทุกเสียง', async () => {
+    const { say, tap, sent, store, last } = setup();
+    await say('ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 18.5 บาท/กก.'); // สูงกว่าที่ผู้ซื้อให้ได้เล็กน้อย
+    await tap(postbackData('confirm'));
+    expect((await store.getDeal('deal-1'))!.status).toBe('failed');
+    const msgs = sent.filter((s) => s.kind === 'push').flatMap((s) => s.messages);
+    const vote = msgs.find((m) => asText(m).includes('ขอมติกลุ่ม'))!;
+    expect(vote).toBeDefined();
+    expect(buttons(vote).map((b) => b.label)).toEqual(['เห็นด้วย ขายที่ราคานี้', 'ไม่เห็นด้วย']);
+    await tap(buttons(vote)[0]!.data);
+    const out = last().messages.map(asText).join(' ');
+    expect(out).toContain('เสียงข้างมากเห็นด้วย');
+    expect(out).toContain('ดีลนี้มาจากมติกลุ่ม');
+    const deal = (await store.getDeal('deal-1'))!;
+    expect(deal).toMatchObject({ status: 'pending_approval', floorWaivers: ['F01'] });
+    await tap(buttons(last().messages[1]!)[0]!.data); // อนุมัติ
+    expect((await store.getDeal('deal-1'))!.status).toBe('agreed');
+    const events = await store.listEvents('deal-1');
+    expect(events.filter((e) => e.type === 'group.vote')).toHaveLength(4);
+    expect(events.some((e) => e.type === 'group.vote_result')).toBe(true);
+    expect(() => Ledger.from(events)).not.toThrow();
+    await tap(buttons(vote)[0]!.data); // ลงมติซ้ำไม่ได้
+    expect(asText(last().messages[0]!)).toContain('ลงมติดีลนี้ไปแล้ว');
+  });
+
+  it('ไม่เห็นด้วยและราคาต่ำกว่าขั้นต่ำของตัวเอง → ถอนตัวได้ ไม่ถูกบังคับขาย กลุ่มที่เหลือไปต่อ', async () => {
+    const { say, tap, sent, store, last } = setup();
+    await say('ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 18.5 บาท/กก.');
+    await tap(postbackData('confirm'));
+    const vote = sent.filter((s) => s.kind === 'push').flatMap((s) => s.messages).find((m) => asText(m).includes('ขอมติกลุ่ม'))!;
+    await tap(buttons(vote)[1]!.data);
+    expect(asText(last().messages[0]!)).toContain('ถอนตัวได้โดยไม่ถูกบังคับขาย');
+    const deal = (await store.getDeal('deal-1'))!;
+    expect(deal.approvals.F01).toBe('reject');
+  });
+
   it('ผลที่ส่งให้เกษตรกรไม่เปิดเผยราคาขั้นต่ำของคนอื่นในกลุ่ม', async () => {
     const { say, tap, sent } = setup();
     await say(ROOF);

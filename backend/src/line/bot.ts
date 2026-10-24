@@ -14,6 +14,7 @@ import {
   getFarmerOffer,
   MAX_LINE_ROUNDS,
   getBuyerReputation,
+  recordGroupVote,
   recordApproval,
   renegotiate,
   startDeal,
@@ -79,6 +80,7 @@ import {
   askActualQuantity,
   rateBuyerMessage,
   paymentSplitMessage,
+  groupVoteMessage,
 } from './flex.js';
 import { FEEDBACK_TH, reputationLine, type FeedbackKind } from '../core/reputation.js';
 import { expectedYieldKg, monthTh, parseRai, recommendCrops, upcomingMonths, type FarmProfile, type Soil } from '../core/farmProfile.js';
@@ -133,6 +135,9 @@ function groupsFor(crop: Crop): GroupForBuyer[] {
     .filter((g) => g.crop === crop)
     .map((g) => ({ crop: g.crop, cropLabel: CROP_LABEL_TH[g.crop], grade: g.grade, province: g.province, members: g.members.length, totalKg: g.members.reduce((n, m) => n + m.quantityKg, 0), window: g.deliveryWindow }));
 }
+
+/** จำนวนสมาชิกที่ข้อเสนอนี้คิดไว้ */
+const groupSize = (best: { terms: { trips: { farmerIds: string[] }[] } }) => best.terms.trips.reduce((n, t) => n + t.farmerIds.length, 0);
 
 /** ชื่อพืชรอบก่อน → รหัสพืช (ถ้าเป็นพืชที่ระบบรู้จัก) */
 function previousCropCode(name: string): Crop | undefined {
@@ -878,6 +883,26 @@ export class LineBot implements LineHooks {
       return reply([text('ได้ค่ะ น้องมะระเริ่มเจรจาใหม่ให้แล้ว 🔁 ใช้เวลาประมาณ 1–2 นาที หนูจะส่งผลให้ดูอีกครั้ง')]);
     }
 
+    if (pb.act === 'group_vote') {
+      if (pb.value !== 'yes' && pb.value !== 'no') return;
+      let r: Awaited<ReturnType<typeof recordGroupVote>>;
+      try {
+        r = await recordGroupVote(ctx, deal.id, farmerId, pb.value);
+      } catch (e) {
+        if (e instanceof AppError) return reply([text(e.message)]);
+        throw e;
+      }
+      const tally = `มติกลุ่ม: เห็นด้วย ${r.yes} · ไม่เห็นด้วย ${r.no} (จาก ${r.total} คน · สมาชิกคนอื่นเป็นตัวจำลอง)`;
+      if (r.result === 'rejected') return reply([text(`${tally}\nเสียงข้างมากไม่เห็นด้วย จึงไม่ขายที่ราคานี้ค่ะ ทุกอย่างบันทึกใน ledger แล้ว`), ...failedMessage(deal.id, 'กลุ่มลงมติไม่ขายที่ราคานี้', (deal.round ?? 0) < MAX_LINE_ROUNDS).slice(1)]);
+      if (r.result === 'insufficient') return reply([text(`${tally}\nเสียงข้างมากเห็นด้วย แต่หลังคนที่ไม่เห็นด้วยถอนตัว ปริมาณไม่ถึงขั้นต่ำของผู้ซื้อ จึงยังขายไม่ได้ค่ะ`)]);
+      if (r.userWithdrawn) {
+        const a = await approveSimulatedMembers(ctx, deal.id, farmerId);
+        return reply([text(`${tally}\nเสียงข้างมากเห็นด้วย ส่วนคุณไม่เห็นด้วยและราคาต่ำกว่าขั้นต่ำของคุณ จึงถอนตัวได้โดยไม่ถูกบังคับขาย${a.status === 'agreed' ? '\nกลุ่มที่เหลือตกลงดีลแล้ว' : ''}`)]);
+      }
+      const offer = await getFarmerOffer(ctx, deal.id, farmerId);
+      return reply([text(`${tally}\nเสียงข้างมากเห็นด้วย ✓ ตรวจรายละเอียดแล้วกดอนุมัติได้เลยค่ะ`), offerMessage(deal.id, offer, 'เพื่อนในกลุ่มเป็นตัวจำลอง จะอนุมัติให้อัตโนมัติเมื่อคุณกดตอบ')]);
+    }
+
     if (pb.act === 'rate_buyer') {
       const kind = pb.value as FeedbackKind | undefined;
       if (deal.status !== 'agreed' || deal.outcome?.kind !== 'prepared' || !kind || !(kind in FEEDBACK_TH)) return reply([text('ให้คะแนนได้หลังดีลตกลงแล้วเท่านั้นค่ะ')]);
@@ -976,7 +1001,9 @@ export class LineBot implements LineHooks {
       await client.push(deal.lineUserId, [offerMessage(dealId, offer, `เพื่อนในกลุ่มอีก ${others} คนเป็นตัวจำลอง จะอนุมัติให้อัตโนมัติเมื่อคุณกดตอบ`, extras)]);
     } else if (deal.status === 'failed') {
       const reason = deal.outcome && 'reason' in deal.outcome ? deal.outcome.reason : (deal.error ?? 'ไม่ทราบสาเหตุ');
-      await client.push(deal.lineUserId, failedMessage(dealId, reason, (deal.round ?? 0) < MAX_LINE_ROUNDS));
+      const best = deal.outcome?.kind === 'escalated' ? deal.outcome.bestOffer : undefined;
+      const vote = best && best.evaluation.membersBelowFloor > 0 && best.evaluation.membersBelowFloor < groupSize(best) ? [groupVoteMessage(dealId, best.buyerName, best.terms.pricePerKg, best.evaluation.membersBelowFloor, groupSize(best))] : [];
+      await client.push(deal.lineUserId, [...failedMessage(dealId, reason, (deal.round ?? 0) < MAX_LINE_ROUNDS), ...vote].slice(0, 5));
     }
   }
 
