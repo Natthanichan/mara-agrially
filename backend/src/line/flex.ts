@@ -9,7 +9,7 @@ import { DECISION_TH, type RoundSummary } from './rounds.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end'] as const;
 export type Act = (typeof ACTS)[number];
 const CROPS: Crop[] = ['rice_hommali', 'bitter_gourd', 'cassava'];
 export const postbackData = (act: Act, dealId?: string, crop?: Crop) => new URLSearchParams({ act, ...(dealId ? { d: dealId } : {}), ...(crop ? { c: crop } : {}) }).toString();
@@ -53,7 +53,7 @@ const bubble = (title: string, body: LineMessage[], footer: LineMessage[], altTe
     type: 'bubble',
     header: { type: 'box', layout: 'vertical', backgroundColor: '#E8F5E9', contents: [{ type: 'text', text: title, weight: 'bold', size: 'md', color: '#1B5E20', wrap: true }] },
     body: { type: 'box', layout: 'vertical', spacing: 'md', contents: [...body, { type: 'separator' }, { type: 'text', text: MOCK_NOTE, size: 'xs', color: '#888888', wrap: true }] },
-    footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: footer },
+    ...(footer.length ? { footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: footer } } : {}), // LINE ไม่รับ box ที่ว่าง
   },
 });
 
@@ -193,6 +193,8 @@ export function buyerConfirmMessage(d: Required<Omit<BuyerDraft, 'step'>>): Line
 
 /** กลุ่มเกษตรกรที่แสดงให้ผู้ซื้อเห็น — ข้อมูลรวมของกลุ่มเท่านั้น ไม่มีชื่อ บัญชี หรือราคาขั้นต่ำของใคร */
 export interface GroupForBuyer {
+  /** ถ้ามี → การ์ดมีปุ่ม "สนใจ เจรจากับกลุ่มนี้" */
+  crop?: Crop;
   cropLabel: string;
   grade: string;
   province: string;
@@ -230,6 +232,7 @@ function groupBubble(g: GroupForBuyer, req: { quantityKg: number; location: stri
         { type: 'text', text: MOCK_NOTE, size: 'xxs', color: '#888888', wrap: true },
       ],
     },
+    ...(g.crop ? { footer: { type: 'box', layout: 'vertical', contents: [button('สนใจ เจรจากับกลุ่มนี้', postbackData('buyer_negotiate', undefined, g.crop), 'สนใจ เจรจากับกลุ่มนี้', 'primary', '#3A4C9C')] } } : {}),
   };
 }
 
@@ -245,7 +248,7 @@ export function buyerMatchesMessages(req: Pick<BuyerRequest, 'crop' | 'quantityK
       altText: `กลุ่มเกษตรกรที่ตรงกับคำขอของคุณ ${sorted.length} กลุ่ม`,
       contents: { type: 'carousel', contents: sorted.map((g) => groupBubble(g, req, 'กลุ่มเกษตรกรที่ตรงกับคำขอ')) },
     },
-    text('ถ้ามีกลุ่มใหม่ที่ตรงกับคำขอ น้องมะระจะแจ้งเตือนคุณที่นี่ค่ะ 🔔\nขั้นต่อไป (กำลังพัฒนา): คุยต่อรองกับน้องมะระแทนกลุ่มเกษตรกรได้เลย'),
+    text('กด “สนใจ เจรจากับกลุ่มนี้” เพื่อต่อรองราคากับน้องมะระที่เป็นตัวแทนกลุ่มได้เลยค่ะ หรือพิมพ์ถามอะไรก็ได้\nถ้ามีกลุ่มใหม่ที่ตรงกับคำขอ น้องมะระจะแจ้งเตือนคุณที่นี่ค่ะ 🔔'),
   ];
 }
 
@@ -310,3 +313,35 @@ export const autoGroupMessage = () =>
 /** สรุปกลุ่มตอนเริ่มเจรจา */
 export const groupSummaryText = (prefix: string, g: { members: number; province: string; totalKg: number }) =>
   text(`${prefix}: รวมกับเพื่อนเกษตรกรอีก ${g.members - 1} คน · จ.${g.province} · รวม ${qty(g.totalKg)} ค่ะ`);
+
+// ---------- ผู้ซื้อเจรจากับกลุ่มเกษตรกร ----------
+
+/** ข้อความระหว่างเจรจา พร้อมปุ่มลัด [ยอมรับราคานี้] [จบการเจรจา] */
+export function negotiationText(t: string, askPerKg: number | undefined): LineMessage {
+  return {
+    ...text(t),
+    quickReply: {
+      items: [
+        ...(askPerKg !== undefined ? [{ type: 'action', action: { type: 'postback', label: `ยอมรับ ${baht(askPerKg)}`.slice(0, 20), data: postbackData('buyer_accept'), displayText: `ยอมรับราคา ${baht(askPerKg)} บาท/กก.` } }] : []),
+        { type: 'action', action: { type: 'postback', label: 'จบการเจรจา', data: postbackData('buyer_end'), displayText: 'จบการเจรจา' } },
+      ],
+    },
+  };
+}
+
+export const negotiationIntro = (g: GroupForBuyer) =>
+  text(`เริ่มเจรจากับกลุ่ม${g.cropLabel} จ.${g.province} ค่ะ 🤝\nสมาชิก ${g.members} คน รวม ${qty(g.totalKg)} หนูเป็นตัวแทนของกลุ่มนะคะ เสนอราคาต่อกก. หรือถามอะไรก็ได้เลยค่ะ`);
+
+export function negotiationAgreed(g: GroupForBuyer, agreedPerKg: number, members: number): LineMessage {
+  return bubble(
+    'ตกลงราคาเบื้องต้นแล้ว 🎉',
+    [
+      row('ผลผลิต', `${g.cropLabel} · จ.${g.province}`, true),
+      row('ราคาที่ตกลง', `${baht(agreedPerKg)} บาท/กก.`, true),
+      row('เกษตรกรในกลุ่ม', `อนุมัติครบ ${members} คน (ตัวจำลอง)`),
+      { type: 'text', text: 'สถานะดีล: ตกลงแล้ว · ส่งมอบ: ยังไม่เริ่ม · ชำระเงิน: ยังไม่ถึงกำหนด (แยกสถานะกัน) ผู้ซื้อโอนเงินตรงเข้าบัญชีเกษตรกรแต่ละคนหลังส่งมอบ ทุกขั้นบันทึกใน ledger แบบ hash chain', size: 'xs', color: '#666666', wrap: true },
+    ],
+    [],
+    `ตกลง ${g.cropLabel} ที่ ${baht(agreedPerKg)} บาท/กก. เกษตรกรในกลุ่มอนุมัติแล้ว (จำลอง)`,
+  );
+}

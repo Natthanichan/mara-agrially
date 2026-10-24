@@ -401,7 +401,7 @@ describe('ฝั่งผู้ซื้อ (คนจริงใน LINE): บ
     expect(saved).toContain('41.5 ตัน');
     expect(saved).toContain('พอสำหรับ 10 ตัน');
     expect(saved).toContain('แจ้งเตือน');
-    expect(saved).toContain('กำลังพัฒนา'); // บอกตรงๆ ว่าการคุยต่อรองยังไม่เสร็จ
+    expect(saved).toContain('สนใจ เจรจากับกลุ่มนี้'); // การ์ดกลุ่มมีปุ่มเริ่มเจรจา
     // ไม่มีชื่อเกษตรกรหรือราคาขั้นต่ำหลุดไปถึงผู้ซื้อ
     for (const floor of ['16.80', '16.50', '17.00', '16.20', '15.50']) expect(saved).not.toContain(floor);
     expect(saved).not.toContain('สมศรี');
@@ -806,5 +806,115 @@ describe('แชตกับน้องมะระใน LINE (AI)', () => {
     expect(json).toMatch(/รอบ \d+ · /);
     expect(json).toContain('https://example.test/?deal=deal-1');
     expect(json).toContain('ทำไมได้ราคานี้');
+  });
+});
+
+// ---------- ผู้ซื้อเจรจากับกลุ่มเกษตรกร ----------
+describe('ผู้ซื้อเจรจาราคากับน้องมะระ (ตัวแทนกลุ่มเกษตรกร)', () => {
+  const quick = (m: LineMessage) => ((m as { quickReply?: { items: { action: { label: string; data: string } }[] } }).quickReply?.items ?? []).map((i) => i.action);
+  const register = async (h: ReturnType<typeof setup>, offer: string) => {
+    await h.tap(postbackData('role_buyer'));
+    await h.tap(postbackData('buyer_crop', undefined, 'rice_hommali'));
+    await h.say('10 ตัน');
+    await h.say('โรงสี จ.ร้อยเอ็ด');
+    await h.say(offer);
+    await h.tap(postbackData('buyer_confirm'));
+  };
+
+  it('ราคาที่น้องมะระขอไม่เคยต่ำกว่าเป้าของกลุ่ม ยอมลดเป็นขั้น และตกลงเมื่อผู้ซื้อเสนอถึง', async () => {
+    const { decide, apply, groupTerms, openingAsk } = await import('../src/line/buyerNegotiation.js');
+    const t = groupTerms('rice_hommali')!;
+    let st = { id: 'x', crop: 'rice_hommali' as const, groupId: t.group.id, askPerKg: openingAsk(t.minPassPerKg, 17.65), minPassPerKg: t.minPassPerKg, rounds: 0, status: 'open' as const, startedAt: '' };
+    expect(st.askPerKg).toBeGreaterThan(t.minPassPerKg);
+    const asks: number[] = [];
+    for (const offer of [15, 15.5, 16, 16.2, 16.4]) {
+      const d = decide(st, offer);
+      st = apply(st, offer, d) as typeof st;
+      asks.push(st.askPerKg);
+      expect(st.askPerKg).toBeGreaterThanOrEqual(t.minPassPerKg); // ไม่ต่ำกว่าเป้า แม้ผู้ซื้อกดราคา
+    }
+    expect(asks.every((a, i) => i === 0 || a <= asks[i - 1]!)).toBe(true); // ลดลงหรือคงที่ ไม่ขึ้นสลับ
+    const accept = decide(st, st.askPerKg);
+    expect(accept).toEqual({ kind: 'accept', agreedPerKg: st.askPerKg });
+    expect(decide(st, undefined).kind).toBe('question');
+  });
+
+  it('อ่านราคาจากข้อความ: ไม่สับสนกับปริมาณหรือจำนวนวัน', async () => {
+    const { extractOffer } = await import('../src/line/buyerNegotiation.js');
+    expect(extractOffer('ให้ 18.2 บาทได้ไหม', 18.9)).toBe(18.2);
+    expect(extractOffer('เอา 10 ตัน ส่งใน 7 วัน', 18.9)).toBeUndefined();
+    expect(extractOffer('10 ตัน ราคา ๑๘.๕', 18.9)).toBe(18.5);
+    expect(extractOffer('ทำไมแพงจัง', 18.9)).toBeUndefined();
+  });
+
+  it('กดสนใจจากการ์ดกลุ่ม → ใช้ราคาในคำขอเป็นข้อเสนอแรก → ต่อรอง → กดยอมรับ → ตกลง + เกษตรกรอนุมัติ (จำลอง) + ledger', async () => {
+    const h = setup();
+    await register(h, '16'); // ต่ำกว่าเป้าของกลุ่ม
+    await h.tap(postbackData('buyer_negotiate', undefined, 'rice_hommali'));
+    const [intro, counter] = h.last().messages;
+    expect(asText(intro!)).toContain('เริ่มเจรจากับกลุ่ม');
+    const st1 = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+    expect(st1.status).toBe('open');
+    expect(st1.askPerKg).toBeGreaterThanOrEqual(st1.minPassPerKg);
+    expect(asText(counter!)).toContain(st1.askPerKg.toFixed(2));
+    expect(quick(counter!).map((a) => a.label)).toEqual([`ยอมรับ ${st1.askPerKg.toFixed(2)}`, 'จบการเจรจา']);
+
+    await h.say('ขอ 16.5 ได้ไหม');
+    const st2 = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+    expect(st2.rounds).toBe(2);
+    expect(st2.askPerKg).toBeLessThanOrEqual(st1.askPerKg);
+    expect(st2.askPerKg).toBeGreaterThanOrEqual(st2.minPassPerKg);
+
+    await h.say('ทำไมแพงจัง'); // ไม่ได้เสนอราคา → ตอบและย้ำราคาเดิม
+    expect((await h.store.getLineSession('U-farmer'))!.buyerNeg!.askPerKg).toBe(st2.askPerKg);
+    expect(asText(h.last().messages[0]!)).toContain(st2.askPerKg.toFixed(2));
+
+    await h.tap(postbackData('buyer_accept'));
+    const msgs = h.last().messages.map(asText).join(' ');
+    expect(msgs).toContain('ตกลงราคาเบื้องต้นแล้ว');
+    expect(msgs).toContain(st2.askPerKg.toFixed(2));
+    const done = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+    expect(done).toMatchObject({ status: 'agreed', agreedPerKg: st2.askPerKg });
+
+    const events = await h.store.listEvents(done.id);
+    expect(() => Ledger.from(events)).not.toThrow();
+    expect(events.filter((e) => e.type === 'bneg.approval' && e.data.simulated === true)).toHaveLength(4);
+    expect(events.at(-1)!.type).toBe('bneg.agreed');
+    // ราคาภายในของกลุ่มไม่ถูกบันทึกหรือส่งออกไปที่ไหนเลย
+    expect(JSON.stringify(events)).not.toContain('minPass');
+  });
+
+  it('เสนอสูงกว่าที่น้องมะระขอ → ตกลงที่ราคาผู้ซื้อทันที (ไม่ลดให้เอง) · พิมพ์ "สนใจ" ก็เริ่มเจรจาได้ · "จบ" ปิดการเจรจา', async () => {
+    const h = setup();
+    await register(h, '25');
+    await h.say('สนใจ');
+    const st = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+    expect(st).toMatchObject({ status: 'agreed', agreedPerKg: 25 });
+
+    const e = setup();
+    await register(e, '16');
+    await e.say('สนใจค่ะ');
+    expect((await e.store.getLineSession('U-farmer'))!.buyerNeg!.status).toBe('open');
+    await e.say('จบ');
+    expect((await e.store.getLineSession('U-farmer'))!.buyerNeg!.status).toBe('ended');
+    expect(asText(e.last().messages[0]!)).toContain('จบการเจรจา');
+  });
+
+  it('มี AI: น้องมะระเขียนข้อความโน้มน้าวตามการตัดสินของโค้ด บริบทไม่มีราคาภายใน และราคาที่ตัดสินต้องอยู่ในข้อความเสมอ', async () => {
+    const h = setup();
+    const seen: string[] = [];
+    h.ctx.chatLlm = () => ({ name: 's', converse: async (req: any) => (seen.push(req.system), { content: [{ text: 'ราคากลางตลาด NABC 17.65 บาท/กก. และกลุ่มส่งเป็นล็อตเดียวค่ะ' }] }) }) as never;
+    h.ctx.chatDailyLimit = 50;
+    await register(h, '16');
+    await h.tap(postbackData('buyer_negotiate', undefined, 'rice_hommali'));
+    const st = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+    const sys = seen.at(-1)!;
+    expect(sys).toContain('"decision"');
+    expect(sys).toContain(`"askPerKg":${st.askPerKg}`);
+    expect(sys).not.toContain(String(st.minPassPerKg));
+    expect(sys).not.toContain('minPass');
+    const msg = asText(h.last().messages[1]!);
+    expect(msg).toContain('17.65');
+    expect(msg).toContain(st.askPerKg.toFixed(2)); // AI ไม่ได้พูดราคา → ระบบเติมให้
   });
 });

@@ -290,6 +290,10 @@ export async function recordApproval(ctx: AppContext, id: string, body: { farmer
   return { status: st.ok ? 'agreed' : 'pending_approval', reason: st.blockedReason, needsRenegotiation: st.needsRenegotiation ?? false };
 }
 
+/** บันทึกเหตุการณ์ลง ledger (hash chain) ของรหัสใดก็ได้ — ใช้กับการเจรจาฝั่งผู้ซื้อใน LINE ด้วย */
+export const appendAudit = (ctx: AppContext, id: string, ev: { actor: LedgerEvent['actor']; actorId?: string; type: string; data: Record<string, unknown> }) =>
+  appendLedger(ctx, id, ev, (ctx.now ?? (() => new Date()))());
+
 async function appendLedger(ctx: AppContext, id: string, ev: { actor: LedgerEvent['actor']; actorId?: string; type: string; data: Record<string, unknown> }, now: Date) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const ledger = Ledger.from(await ctx.store.listEvents(id), () => now);

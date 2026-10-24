@@ -7,6 +7,7 @@
 
 import {
   AppError,
+  appendAudit,
   approveSimulatedMembers,
   bangkokDate,
   getDeal,
@@ -42,6 +43,9 @@ import {
   buyerCropMessage,
   buyerRequestsMessage,
   buyerAlertMessage,
+  negotiationAgreed,
+  negotiationIntro,
+  negotiationText,
   buyerMatchesMessages,
   type GroupForBuyer,
   confirmMessage,
@@ -58,6 +62,7 @@ import {
 } from './flex.js';
 import { negotiationRounds } from './rounds.js';
 import { MAX_HISTORY, smartChat, type ChatAction } from './chat.js';
+import { apply, decide, extractOffer, groupTerms, MAX_BUYER_ROUNDS, openingAsk, type BuyerNegDecision, type BuyerNegState } from './buyerNegotiation.js';
 import type { ListingDraft } from '../store/types.js';
 import { parseBuyerCrop, parseBuyerLocation, parseBuyerPrice, parseBuyerQuantity, parseListing } from './parse.js';
 import { verifyLineSignature } from './signature.js';
@@ -77,6 +82,8 @@ const STATUS = /^(สถานะ|status)$/i;
 const CANCEL = /^(ยกเลิก|cancel)$/i;
 const MY_REQUESTS = /^(คำขอของฉัน|คำขอซื้อ|รายการของฉัน)$/;
 const NEW_REQUEST = /^(ซื้อ|ขอซื้อ|ลงทะเบียน|คำขอใหม่|ลงทะเบียนคำขอ)$/;
+const INTEREST = /^(สนใจ|เจรจา|ต่อรอง|ขอเจรจา|ขอต่อรอง)(ครับ|ค่ะ|คะ|จ้า|นะ)?\s*$/;
+const END_NEG = /^(จบ|จบการเจรจา|ไม่เอาแล้ว|พอแล้ว)$/;
 const MAX_EVENTS = 20;
 
 /** รหัสกลุ่มจำลองสำหรับเดโม → กลุ่มข้าวหอมมะลิ ร้อยเอ็ด (ข้อมูลจำลอง) */
@@ -95,7 +102,7 @@ const completeBuyerDraft = (d: BuyerDraft) =>
 function groupsFor(crop: Crop): GroupForBuyer[] {
   return groupListings(listings, farmers)
     .filter((g) => g.crop === crop)
-    .map((g) => ({ cropLabel: CROP_LABEL_TH[g.crop], grade: g.grade, province: g.province, members: g.members.length, totalKg: g.members.reduce((n, m) => n + m.quantityKg, 0), window: g.deliveryWindow }));
+    .map((g) => ({ crop: g.crop, cropLabel: CROP_LABEL_TH[g.crop], grade: g.grade, province: g.province, members: g.members.length, totalKg: g.members.reduce((n, m) => n + m.quantityKg, 0), window: g.deliveryWindow }));
 }
 
 /** แจ้งเตือนผู้ซื้อได้กี่คนต่อกลุ่มใหม่ (push นับโควตาข้อความของ LINE OA) */
@@ -184,11 +191,11 @@ export class LineBot implements LineHooks {
     const t = raw.trim();
     const { store } = this.getCtx();
     if (GREETING.test(t)) {
-      await this.save(userId, { role: undefined, draft: undefined, buyerDraft: undefined, awaiting: undefined });
+      await this.save(userId, { role: undefined, draft: undefined, buyerDraft: undefined, awaiting: undefined, buyerNeg: undefined });
       return reply([roleMessage()]);
     }
     if (CANCEL.test(t)) {
-      await this.save(userId, { draft: undefined, buyerDraft: undefined, awaiting: undefined });
+      await this.save(userId, { draft: undefined, buyerDraft: undefined, awaiting: undefined, buyerNeg: undefined });
       return reply([text('ยกเลิกแล้วค่ะ พิมพ์ “เมนู” เพื่อเริ่มใหม่ได้เลย')]);
     }
     const session = await store.getLineSession(userId);
@@ -296,6 +303,116 @@ export class LineBot implements LineHooks {
     };
   }
 
+  // ---------- ผู้ซื้อเจรจากับกลุ่มเกษตรกร ----------
+
+  private negGroup(crop: Crop): GroupForBuyer | undefined {
+    return groupsFor(crop)[0];
+  }
+
+  private async startBuyerNeg(userId: string, session: LineSession, crop: Crop, reply: (m: LineMessage[]) => Promise<void>) {
+    const ctx = this.getCtx();
+    const terms = groupTerms(crop);
+    const g = this.negGroup(crop);
+    if (!terms || !g) return reply([text(`ตอนนี้ยังไม่มีกลุ่มเกษตรกรที่ขาย${CROP_LABEL_TH[crop]}ค่ะ ถ้ามีกลุ่มใหม่หนูจะแจ้งเตือนนะคะ`)]);
+    let median: number | undefined;
+    try {
+      const ref = await Promise.race([ctx.agentDeps().market.getReference(crop, bangkokDate((ctx.now ?? (() => new Date()))()), g.province), new Promise<undefined>((r) => setTimeout(() => r(undefined), 3000))]);
+      median = ref?.medianPerKg;
+    } catch {
+      /* ไม่มีราคาตลาด = เปิดราคาจากเป้าของกลุ่ม */
+    }
+    const st: BuyerNegState = {
+      id: `BNEG-${(ctx.newId ?? randomUUID)()}`,
+      crop,
+      groupId: terms.group.id,
+      askPerKg: openingAsk(terms.minPassPerKg, median),
+      minPassPerKg: terms.minPassPerKg,
+      rounds: 0,
+      status: 'open',
+      startedAt: this.now(),
+      ...(median !== undefined ? { marketMedianPerKg: median } : {}),
+    } as BuyerNegState;
+    await appendAudit(ctx, st.id, { actor: 'system', type: 'bneg.started', data: { buyerUserId: userId, crop, groupId: st.groupId, openingAskPerKg: st.askPerKg } });
+    const withNeg: LineSession = { ...session, buyerNeg: st, buyerDraft: undefined };
+    await this.save(userId, { buyerNeg: st, buyerDraft: undefined });
+    // ผู้ซื้อมีคำขอซื้อพืชนี้อยู่แล้ว → ใช้ราคาที่เขาเสนอเป็นข้อเสนอแรก
+    const req = (await ctx.store.listBuyerRequests(userId, 5)).find((r) => r.crop === crop);
+    if (req) return reply([negotiationIntro(g), ...(await this.negRound(userId, withNeg, `ผู้ซื้อเสนอ ${req.offerPerKg} บาท/กก. ตามคำขอซื้อ`, req.offerPerKg))]);
+    return reply([negotiationIntro(g), ...(await this.negRound(userId, withNeg, 'ขอทราบราคาที่กลุ่มเสนอ', undefined))]);
+  }
+
+  private async endBuyerNeg(userId: string, session: LineSession, reply: (m: LineMessage[]) => Promise<void>) {
+    const st = session.buyerNeg!;
+    await appendAudit(this.getCtx(), st.id, { actor: 'buyer', actorId: userId, type: 'bneg.ended', data: { rounds: st.rounds, lastAskPerKg: st.askPerKg } });
+    await this.save(userId, { buyerNeg: { ...st, status: 'ended' } });
+    return reply([text(`จบการเจรจาแล้วค่ะ ขอบคุณที่สนใจนะคะ ถ้าเปลี่ยนใจ กด “สนใจ เจรจากับกลุ่มนี้” หรือพิมพ์ “สนใจ” ได้เสมอค่ะ (ราคาล่าสุดที่หนูเสนอ ${st.askPerKg.toFixed(2)} บาท/กก.)`)]);
+  }
+
+  /** 1 รอบการเจรจา: โค้ดตัดสินราคา → บันทึก ledger → Nova เขียนข้อความตามการตัดสิน (หรือใช้ข้อความสำเร็จรูป) */
+  private async negRound(userId: string, session: LineSession, message: string, offerOverride?: number): Promise<LineMessage[]> {
+    const ctx = this.getCtx();
+    const st = session.buyerNeg!;
+    const offer = offerOverride ?? extractOffer(message, st.askPerKg);
+    const d = decide(st, offer);
+    const next = apply(st, offer, d);
+    if (offer !== undefined) await appendAudit(ctx, st.id, { actor: 'buyer', actorId: userId, type: 'bneg.buyer_offer', data: { offerPerKg: offer, round: next.rounds } });
+    if (d.kind !== 'question') await appendAudit(ctx, st.id, { actor: 'agent', type: `bneg.${d.kind}`, data: d.kind === 'accept' ? { agreedPerKg: d.agreedPerKg } : { askPerKg: d.askPerKg } });
+    const g = this.negGroup(st.crop)!;
+    const say = await this.negotiatorText(userId, session, next, d, offer, message, g);
+    if (d.kind === 'accept') {
+      const terms = groupTerms(st.crop)!;
+      for (const m of terms.members) await appendAudit(ctx, st.id, { actor: 'farmer', actorId: m.farmerId, type: 'bneg.approval', data: { decision: 'approve', simulated: true } });
+      await appendAudit(ctx, st.id, { actor: 'system', type: 'bneg.agreed', data: { agreedPerKg: d.agreedPerKg, deliveryStatus: 'not_started', paymentStatus: 'not_due' } });
+      await this.save(userId, { buyerNeg: next });
+      return [text(say), negotiationAgreed(g, d.agreedPerKg, terms.members.length)];
+    }
+    await this.save(userId, { buyerNeg: next });
+    return [negotiationText(say, next.askPerKg)];
+  }
+
+  private async negotiatorText(userId: string, session: LineSession, st: BuyerNegState, d: BuyerNegDecision, offer: number | undefined, message: string, g: GroupForBuyer): Promise<string> {
+    const ctx = this.getCtx();
+    const price = d.kind === 'accept' ? d.agreedPerKg : d.askPerKg;
+    const median = (st as BuyerNegState & { marketMedianPerKg?: number }).marketMedianPerKg;
+    const terms = groupTerms(st.crop)!;
+    const evidence = [
+      ...(median !== undefined ? [{ id: 'market', text: `ราคากลางตลาด NABC ${median.toFixed(2)} บาท/กก.` }] : []),
+      { id: 'volume', text: `ปริมาณรวม ${g.totalKg.toLocaleString('en-US')} กก. จาก ${g.members} ราย ส่งเป็นล็อตเดียว` },
+      { id: 'logistics', text: `จัดรถรวม ${terms.trips.length} เที่ยว ผู้ซื้อไม่ต้องรับทีละแปลง` },
+      { id: 'grade', text: `เกรด ${g.grade} ทุกราย (ตามที่เกษตรกรแจ้ง) ยินดีให้ตรวจคุณภาพก่อนรับ` },
+      { id: 'delivery', text: `ส่งมอบได้ ${g.window.from} ถึง ${g.window.to}` },
+    ];
+    let out: string | undefined;
+    const llm = ctx.chatLlm?.();
+    if (llm) {
+      try {
+        if (await ctx.store.takeDailyQuota(`chat-${bangkokDate((ctx.now ?? (() => new Date()))())}`, ctx.chatDailyLimit ?? 300)) {
+          const context = {
+            group: { crop: g.cropLabel, province: g.province, members: g.members, totalKg: g.totalKg, grade: g.grade },
+            evidence,
+            decision: { kind: d.kind, ...(d.kind === 'accept' ? { agreedPerKg: d.agreedPerKg } : { askPerKg: d.askPerKg }), ...(offer !== undefined ? { buyerOfferPerKg: offer } : {}), round: st.rounds, maxRounds: MAX_BUYER_ROUNDS },
+          };
+          const r = await smartChat(llm, { role: 'negotiator', context, history: session.chat ?? [], message });
+          out = r.text;
+          await this.save(userId, { chat: [...(session.chat ?? []), { r: 'u' as const, t: message.slice(0, 500) }, { r: 'a' as const, t: r.text.slice(0, 500) }].slice(-MAX_HISTORY) });
+        }
+      } catch (e) {
+        console.error('negotiator chat failed:', (e as Error).message);
+      }
+    }
+    if (!out) {
+      const ev = evidence[st.rounds % evidence.length]!.text;
+      out =
+        d.kind === 'accept' ? `ตกลงที่ ${price.toFixed(2)} บาท/กก. ค่ะ ขอบคุณมากนะคะ หนูส่งให้เกษตรกรในกลุ่มอนุมัติแล้วค่ะ`
+        : d.kind === 'final' ? `${price.toFixed(2)} บาท/กก. เป็นราคาสุดท้ายที่กลุ่มรับได้ค่ะ ${ev}`
+        : d.kind === 'question' ? `ตอนนี้หนูเสนอ ${price.toFixed(2)} บาท/กก. ค่ะ เพราะ${ev}`
+        : `หนูขอเสนอ ${price.toFixed(2)} บาท/กก. ค่ะ เพราะ${ev}`;
+    }
+    // ราคาที่โค้ดตัดสินต้องอยู่ในข้อความเสมอ
+    const shown = [price.toFixed(2), String(price)].some((p) => out!.includes(p));
+    return shown ? out : `${out}\n${d.kind === 'accept' ? 'ราคาที่ตกลง' : 'ราคาที่หนูเสนอ'}: ${price.toFixed(2)} บาท/กก.`;
+  }
+
   private async buyerChatReply(userId: string, chat: ChatAction, reply: (m: LineMessage[]) => Promise<void>, reAsk?: LineMessage) {
     if (chat.kind === 'buyer_request') {
       await this.save(userId, { buyerDraft: { step: 'confirm', ...chat.draft } });
@@ -335,6 +452,15 @@ export class LineBot implements LineHooks {
   /** ผู้ซื้อ (คนจริง) ตอบทีละข้อ: พืช → ปริมาณ → สถานที่ส่ง → ราคาที่เสนอ → ยืนยัน */
   private async onBuyerText(userId: string, t: string, session: LineSession, reply: (m: LineMessage[]) => Promise<void>) {
     if (MY_REQUESTS.test(t)) return reply([buyerRequestsMessage(await this.getCtx().store.listBuyerRequests(userId, 5))]);
+    // กำลังเจรจาราคากับกลุ่มเกษตรกร → ทุกข้อความเป็นส่วนหนึ่งของการเจรจา
+    if (session.buyerNeg?.status === 'open') {
+      if (END_NEG.test(t)) return this.endBuyerNeg(userId, session, reply);
+      return reply(await this.negRound(userId, session, t));
+    }
+    if (INTEREST.test(t)) {
+      const latest = (await this.getCtx().store.listBuyerRequests(userId, 1))[0];
+      return this.startBuyerNeg(userId, session, latest?.crop ?? session.buyerDraft?.crop ?? 'rice_hommali', reply);
+    }
     const d = session.buyerDraft;
     if (!d) {
       // ไม่มีคำขอที่กำลังกรอก → คุยกับน้องมะระได้ (ถามเรื่องกลุ่มเกษตรกร/ราคา) หรือพิมพ์ “ซื้อ” เพื่อลงทะเบียน
@@ -415,6 +541,17 @@ export class LineBot implements LineHooks {
       await this.save(userId, { role: 'buyer', draft: undefined, buyerDraft: { step: 'quantity', crop: pb.crop } });
       return reply([buyerAskQuantity(pb.crop)]);
     }
+    if (pb.act === 'buyer_negotiate') {
+      const session = (await store.getLineSession(userId)) ?? { updatedAt: this.now() };
+      await this.save(userId, { role: 'buyer' });
+      return this.startBuyerNeg(userId, { ...session, role: 'buyer' }, pb.crop ?? 'rice_hommali', reply);
+    }
+    if (pb.act === 'buyer_accept' || pb.act === 'buyer_end') {
+      const session = await store.getLineSession(userId);
+      if (session?.buyerNeg?.status !== 'open') return reply([text('ตอนนี้ไม่มีการเจรจาที่เปิดอยู่ค่ะ กด “สนใจ เจรจากับกลุ่มนี้” ในการ์ดกลุ่มเกษตรกรเพื่อเริ่มใหม่ได้เลย')]);
+      if (pb.act === 'buyer_end') return this.endBuyerNeg(userId, session, reply);
+      return reply(await this.negRound(userId, session, `ยอมรับราคา ${session.buyerNeg.askPerKg} บาท/กก.`, session.buyerNeg.askPerKg));
+    }
     if (pb.act === 'buyer_confirm') {
       const session = await store.getLineSession(userId);
       const full = session?.buyerDraft?.step === 'confirm' ? completeBuyerDraft(session.buyerDraft) : undefined;
@@ -491,7 +628,7 @@ export class LineBot implements LineHooks {
     try {
       const ctx = this.getCtx();
       const v = await getDeal(ctx, dealId);
-      const g: GroupForBuyer = { cropLabel: v.group.cropLabel, grade: v.group.grade, province: v.group.province, members: v.group.members, totalKg: v.group.totalKg, window: v.group.window };
+      const g: GroupForBuyer = { crop: v.group.crop as Crop, cropLabel: v.group.cropLabel, grade: v.group.grade, province: v.group.province, members: v.group.members, totalKg: v.group.totalKg, window: v.group.window };
       const crop = (await ctx.store.getDeal(dealId))!.crop;
       const seen = new Set<string>([farmerUserId]);
       const requests = (await ctx.store.listOpenBuyerRequestsByCrop(crop, 50)).filter((r) => !seen.has(r.userId) && (seen.add(r.userId), true)).slice(0, MAX_BUYER_ALERTS);

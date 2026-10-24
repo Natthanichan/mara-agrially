@@ -28,7 +28,7 @@ export const MAX_HISTORY = 6;
 const TIMEOUT_MS = 9000;
 
 const PERSONA = `คุณคือ "น้องมะระ" ผู้ช่วย AI ของแพลตฟอร์ม MaRa-AgriAlly ที่รวมผลผลิตเกษตรกรรายย่อยแล้วเจรจาขายแทนกลุ่ม
-บุคลิก: ผู้หญิง สุภาพ อบอุ่น ใช้ "หนู" และลงท้าย "ค่ะ/คะ" เสมอ ห้ามใช้ "ครับ" หรือ "ผม"
+บุคลิก: ผู้หญิง สุภาพ อบอุ่น เรียกตัวเองว่า "หนู" หรือ "น้องมะระ" เท่านั้น ลงท้าย "ค่ะ/คะ" เสมอ ห้ามใช้ "ฉัน" "ดิฉัน" "ครับ" หรือ "ผม"
 ตอบสั้น 1–4 ประโยค เป็นภาษาไทยที่เข้าใจง่าย
 กฎ:
 - ใช้เฉพาะข้อมูลในบริบท (JSON) ด้านล่าง ตัวเลขทุกตัวต้องมาจากบริบทหรือข้อความของผู้ใช้เท่านั้น ถ้าไม่มีข้อมูลให้บอกตรง ๆ ว่าไม่ทราบ
@@ -46,6 +46,16 @@ const BUYER_PROMPT = `${PERSONA}
 ใช้หลักฐานในบริบท: ราคาตลาด NABC (market), ปริมาณรวมและจำนวนสมาชิก, เกรด, การรวมขนส่ง, ช่วงส่งมอบ — ถ้าข้อมูลไหนไม่มีในบริบท ห้ามอ้าง
 หนูไม่รู้ราคาขั้นต่ำของเกษตรกร และตกลงราคาแทนเกษตรกรไม่ได้ การตกลงทุกครั้งต้องให้เกษตรกรอนุมัติในระบบ
 ถ้าผู้ซื้อบอกความต้องการซื้อ (พืช ปริมาณ สถานที่ส่ง ราคาที่เสนอ) ให้เรียก propose_buyer_request ถ้าข้อมูลไม่ครบให้ถาม`;
+
+const NEGOTIATOR_PROMPT = `${PERSONA}
+คุณกำลัง "เจรจาราคา" กับผู้ซื้อในฐานะตัวแทนกลุ่มเกษตรกร
+ระบบ (โค้ด) ตัดสินแล้วว่ารอบนี้ต้องทำอะไร ดู context.decision และต้องสื่อสารตามนั้นเท่านั้น:
+- accept → ขอบคุณ ยืนยันว่าตกลงที่ agreedPerKg บาท/กก. และบอกว่ากำลังส่งให้เกษตรกรในกลุ่มอนุมัติ
+- counter → เสนอ askPerKg บาท/กก. พร้อมเหตุผล 1–2 ข้อจากหลักฐานใน context.evidence ที่ตอบสิ่งที่ผู้ซื้อเพิ่งพูด (ถ้าผู้ซื้อกังวลเรื่องราคาตลาด อ้างราคา NABC ถ้ากังวลเรื่องปริมาณ/การรับของ อ้างปริมาณรวม/รถรวม)
+- final → บอกว่า askPerKg บาท/กก. เป็นราคาสุดท้ายที่กลุ่มรับได้ และขอบคุณ
+- question → ตอบคำถามของผู้ซื้อจากบริบท แล้วย้ำว่าราคาที่เสนออยู่คือ askPerKg บาท/กก.
+ห้ามเสนอหรือยอมราคาอื่นนอกจากที่ระบุ ห้ามลดราคาเอง ห้ามใช้เหตุผลซ้ำกับที่เคยพูดในประวัติ ถ้ามีหลักฐานอื่นให้ใช้
+หนูไม่รู้ราคาขั้นต่ำของเกษตรกร และไม่ต้องพูดถึง`;
 
 const LISTING_TOOL: ToolSpec = {
   name: 'propose_listing',
@@ -124,15 +134,19 @@ function validBuyerRequest(i: Record<string, unknown>): Required<Omit<BuyerDraft
   return { crop, quantityKg: Math.round(qty * 100) / 100, location, offerPerKg: Math.round(offer * 100) / 100 };
 }
 
+/** น้องมะระเป็นผู้หญิง: แก้สรรพนาม/คำลงท้ายที่โมเดลเผลอใช้ */
+export const voice = (t: string) => t.replace(/ดิฉัน|ฉัน/g, 'หนู').replace(/ครับผม|ครับ/g, 'ค่ะ');
+
 const SAFE_REPLY = 'ขอโทษค่ะ เรื่องนี้หนูยังไม่มีข้อมูลที่ยืนยันได้ จึงขอไม่ตอบเป็นตัวเลขนะคะ ลองถามเรื่องดีลของคุณ ราคาตลาด หรือพิมพ์ “เมนู” ได้เลยค่ะ';
 
 /** คุยกับ Nova 1 รอบ (ตอบใหม่ได้อีก 1 ครั้งถ้ามีตัวเลขที่ไม่มีหลักฐาน) */
 export async function smartChat(
   llm: LlmClient,
-  opts: { role: 'farmer' | 'buyer'; context: unknown; history: ChatTurn[]; message: string },
+  opts: { role: 'farmer' | 'buyer' | 'negotiator'; context: unknown; history: ChatTurn[]; message: string },
 ): Promise<ChatAction> {
-  const system = `${opts.role === 'farmer' ? FARMER_PROMPT : BUYER_PROMPT}\n\nบริบท (JSON):\n${JSON.stringify(opts.context)}`;
-  const tools = [opts.role === 'farmer' ? LISTING_TOOL : BUYER_TOOL];
+  const prompt = opts.role === 'farmer' ? FARMER_PROMPT : opts.role === 'buyer' ? BUYER_PROMPT : NEGOTIATOR_PROMPT;
+  const system = `${prompt}\n\nบริบท (JSON):\n${JSON.stringify(opts.context)}`;
+  const tools = opts.role === 'farmer' ? [LISTING_TOOL] : opts.role === 'buyer' ? [BUYER_TOOL] : [];
   const allowed = allowedNumbers(opts.context, opts.history, opts.message);
   const messages = toMessages(opts.history, opts.message);
 
@@ -148,7 +162,7 @@ export async function smartChat(
     const text = res.content.filter(isText).map((b) => b.text.trim()).filter(Boolean).join('\n');
     const use = res.content.find(isToolUse);
     const input = (use?.toolUse.input ?? {}) as Record<string, unknown>;
-    const said = typeof input.reply === 'string' && input.reply.trim() ? input.reply.trim() : text;
+    const said = voice(typeof input.reply === 'string' && input.reply.trim() ? input.reply.trim() : text);
 
     if (use?.toolUse.name === 'propose_listing' && opts.role === 'farmer') {
       const v = validListing(input);

@@ -72,6 +72,8 @@ export interface LineSession {
   draft?: ListingDraft;
   buyerDraft?: BuyerDraft;
   lastDealId?: string;
+  /** ผู้ซื้อกำลังเจรจาราคากับกลุ่มเกษตรกร (มีราคาภายในที่ห้ามส่งออก — อยู่ฝั่งเซิร์ฟเวอร์เท่านั้น) */
+  buyerNeg?: import('../line/buyerNegotiation.js').BuyerNegState;
   /** ประวัติแชตล่าสุดกับน้องมะระ (ไม่เกิน 6 ข้อความ) */
   chat?: { r: 'u' | 'a'; t: string }[];
   updatedAt: string;
