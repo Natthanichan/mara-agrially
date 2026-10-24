@@ -15,6 +15,18 @@ export interface ListingDraft {
   floorPricePerKg: number;
 }
 
+/** ผลการเจรจากับผู้ซื้อ 1 รายใน 1 ดีล — ใช้เป็นหลักฐานประวัติในการเจรจาครั้งถัดไป */
+export interface BuyerOutcome {
+  buyerId: string;
+  crop: Crop;
+  dealId: string;
+  at: string;
+  openingPerKg: number;
+  finalPerKg: number;
+  decision: string;
+  chosen: boolean;
+}
+
 export type LineRole = 'farmer' | 'buyer';
 
 /** ผู้ซื้อ (คนจริงใน LINE) กำลังตอบคำถามทีละข้อเพื่อลงทะเบียนความต้องการซื้อ */
@@ -111,6 +123,9 @@ export interface DealStore {
   listBuyerRequests(userId: string, limit: number): Promise<BuyerRequest[]>;
   /** คำขอซื้อที่เปิดอยู่ของพืชนี้ (ทุกผู้ซื้อ) ใหม่สุดก่อน — ใช้แจ้งเตือนเมื่อมีกลุ่มเกษตรกรที่ตรงกัน */
   listOpenBuyerRequestsByCrop(crop: Crop, limit: number): Promise<Pick<BuyerRequest, 'id' | 'userId' | 'quantityKg' | 'offerPerKg' | 'location'>[]>;
+  recordBuyerOutcomes(rows: BuyerOutcome[]): Promise<void>;
+  /** ประวัติกับผู้ซื้อรายนี้สำหรับพืชนี้ ใหม่สุดก่อน */
+  listBuyerOutcomes(buyerId: string, crop: Crop, limit: number): Promise<BuyerOutcome[]>;
   /** สร้างกลุ่ม คืน false ถ้ารหัสนี้มีอยู่แล้ว */
   createFarmerGroup(g: FarmerGroup): Promise<boolean>;
   getFarmerGroup(code: string): Promise<FarmerGroup | undefined>;

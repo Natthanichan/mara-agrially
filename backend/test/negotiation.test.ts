@@ -222,3 +222,26 @@ describe('หลักฐานทำให้ผลดีขึ้นจริ�
     expect(c1.metrics.finalNetPerKgAvg! - c0.metrics.finalNetPerKgAvg!).toBeGreaterThan(0.05);
   });
 });
+
+describe('การตรวจตัวเลขในข้อความ', () => {
+  it('เลขไทยถูกตรวจเหมือนเลขอารบิก (กันหลบการตรวจการรั่ว)', async () => {
+    const { checkMessageLeak, extractNumbers } = await import('../src/agent/guardrails.js');
+    expect(extractNumbers('ขั้นต่ำ ๑๗.๐๐ บาท')).toEqual([17]);
+    expect(checkMessageLeak('สมาชิกรับได้ ๑๖.๘๐ บาท', [16.8])?.code).toBe('private_data_leak');
+  });
+
+  it('จำนวนนับเล็ก ๆ (7 วัน, 2 เที่ยว) ไม่ต้องมีหลักฐาน แต่ราคา/เปอร์เซ็นต์ที่แต่งขึ้นยังถูกจับ', async () => {
+    const { numbersNeedingEvidence } = await import('../src/agent/guardrails.js');
+    expect(numbersNeedingEvidence('ส่งได้ภายใน 7 วัน รถ 2 เที่ยว')).toEqual([]);
+    expect(numbersNeedingEvidence('ประหยัดต้นทุนได้ 12% และคนกลางให้ 21.50 บาท')).toEqual([12, 21.5]);
+    expect(numbersNeedingEvidence('ภายใน ๗ วัน ราคา ๒๐.๕๐')).toEqual([20.5]);
+  });
+
+  it('ขั้นต่ำที่เป็นจำนวนเต็มยังถูกจับ แม้เขียนเป็นจำนวนวัน', async () => {
+    const { quote, counter, buyers } = setup({ floorOverride: { F01: 19 } });
+    const sid = await quote('B-C');
+    const r = (await counter(sid, { price_per_kg: 22, message: 'ส่งได้ใน 19 วัน ขอเสนอ 22.00 บาท/กก.' })) as { code: string };
+    expect(r.code).toBe('private_data_leak');
+    expect(buyers.sent).toHaveLength(0);
+  });
+});

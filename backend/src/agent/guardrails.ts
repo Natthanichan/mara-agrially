@@ -17,9 +17,25 @@ export interface GuardrailViolation {
 
 const NUM = /\d[\d,]*(?:\.\d+)?/g;
 
-/** ดึงตัวเลขทั้งหมดในข้อความ (รองรับ 41,500 และ 17.65) */
+/** แปลงเลขไทย (๐–๙) เป็นเลขอารบิก — กันการหลบการตรวจด้วยเลขไทย */
+export const toArabicDigits = (text: string) => text.replace(/[๐-๙]/g, (d) => String('๐๑๒๓๔๕๖๗๘๙'.indexOf(d)));
+
+/** ดึงตัวเลขทั้งหมดในข้อความ (รองรับ 41,500 · 17.65 · เลขไทย) */
 export function extractNumbers(text: string): number[] {
-  return [...text.matchAll(NUM)].map((m) => Number(m[0].replace(/,/g, ''))).filter(Number.isFinite);
+  return [...toArabicDigits(text).matchAll(NUM)].map((m) => Number(m[0].replace(/,/g, ''))).filter(Number.isFinite);
+}
+
+/** จำนวนนับ/ระยะเวลาเล็ก ๆ (เช่น 7 วัน, 2 เที่ยว, 4 ราย) — ไม่ใช่สถิติหรือราคา จึงไม่ต้องมีหลักฐาน แต่ยังผ่านการตรวจการรั่วตามปกติ */
+const COUNT = /(?<![\d.,])(\d{1,2})\s*(วัน|รอบ|ครั้ง|เที่ยว|ราย|คน|เดือน|สัปดาห์|ชั่วโมง|ข้อ|จุด|แปลง)/g;
+export function numbersNeedingEvidence(text: string): number[] {
+  const t = toArabicDigits(text);
+  const counts = [...t.matchAll(COUNT)].map((m) => Number(m[1])).filter((n) => n <= 31);
+  const all = extractNumbers(t);
+  for (const c of counts) {
+    const i = all.indexOf(c);
+    if (i >= 0) all.splice(i, 1);
+  }
+  return all;
 }
 
 /**

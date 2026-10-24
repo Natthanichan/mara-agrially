@@ -385,7 +385,7 @@ export class MockBuyerApi {
     if (next >= budget || s.round === buyer.maxRounds) {
       return this.respond(s, 'final_offer', `ราคาสุดท้ายของ${buyer.name}คือ ${next.toFixed(2)} บาท/กก.${ackNote}${deductionNote}${this.deductionNote(s)}`, objection, acknowledged);
     }
-    return this.respond(s, 'counter', `${buyer.name} ขยับให้เป็น ${next.toFixed(2)} บาท/กก.${ackNote}${deductionNote}${this.deductionNote(s)} — ${objection.text}`, objection, acknowledged);
+    return this.respond(s, 'counter', `${buyer.name} ขยับให้เป็น ${next.toFixed(2)} บาท/กก.${ackNote}${deductionNote}${this.deductionNote(s)}`, objection, acknowledged);
   }
 
   /** น้ำหนักของเหตุผลรอบนี้ (0–1): ตรงข้อกังวล × ยังไม่ซ้ำ × ถูกต้อง (ราคาอ้างอิงต้องสูงกว่าที่ให้อยู่จริง) */

@@ -15,17 +15,17 @@ export function toSteps(trace: readonly Pick<TraceEvent, 'type' | 'data' | 'at'>
     switch (e.type) {
       case 'plan':
       case 'reasoning':
-        steps.push({ kind: e.type, at, text: d.text });
+        // ไม่แสดงข้อความคิดดิบของ AI บนหน้าเว็บ (ยังเก็บใน ledger เพื่อตรวจสอบ) — แสดงกลยุทธ์ + เหตุผลสั้นในการ์ดข้อเสนอแทน
         break;
       case 'tool_call':
         lastCall = { tool: d.tool, input: d.input };
         break;
       case 'buyer_response':
         buyerBySession.set(d.sessionId, d.buyerName);
-        steps.push({ kind: 'buyer', at, buyer: d.buyerName, buyerId: d.buyerId, decision: d.decision, price: d.pricePerKg, deductions: d.deductions, message: d.message, round: d.round });
+        steps.push({ kind: 'buyer', at, buyer: d.buyerName, buyerId: d.buyerId, decision: d.decision, price: d.pricePerKg, deductions: d.deductions, message: d.message, round: d.round, ...(d.objection ? { objection: d.objection } : {}), ...(d.acknowledged ? { acknowledged: d.acknowledged } : {}) });
         break;
       case 'counter_sent':
-        steps.push({ kind: 'counter', at, buyerId: d.buyerId, price: d.pricePerKg, contest: d.contestDeductions, message: d.message });
+        steps.push({ kind: 'counter', at, buyerId: d.buyerId, price: d.pricePerKg, contest: d.contestDeductions, message: d.message, round: d.round, strategy: d.strategy, rationale: d.rationale, evidence: d.evidence ?? [] });
         break;
       case 'guardrail_blocked':
         steps.push({ kind: 'blocked', at, buyerId: d.buyerId, code: d.code, reason: d.reason, attemptedPrice: d.attemptedPricePerKg ?? d.pricePerKg });
@@ -46,6 +46,7 @@ export function toSteps(trace: readonly Pick<TraceEvent, 'type' | 'data' | 'at'>
             hits: (r.results ?? []).map((h: any) => ({ source: h.source, text: String(h.text).split('\n').slice(1).join(' '), disclaimer: h.disclaimer })),
           });
         if (d.tool === 'list_buyers') steps.push({ kind: 'buyers', at, buyers: r.buyers });
+        if (d.tool === 'get_negotiation_history' && r.records?.length) steps.push({ kind: 'history', at, buyerId: r.buyer_id, records: r.records });
         const ev = d.tool === 'evaluate_offer' ? r : d.tool === 'submit_counter' ? r.evaluation : undefined;
         if (ev?.sessionId)
           steps.push({ kind: 'evaluation', at, buyer: buyerBySession.get(ev.sessionId), buyerId: ev.buyerId, price: ev.pricePerKg, deductions: ev.deductions, netAvg: ev.netPerKgAvg, netMin: ev.netPerKgMin, passes: ev.passesAllFloors, below: ev.membersBelowFloor, total: ev.totalNetBaht });

@@ -118,8 +118,15 @@ describe('Agent + LLM จำลอง: เจรจาครบวงจร', ()
     }
   });
 
-  it('มะระ: ไม่มีข้อเสนอผ่านขั้นต่ำทุกคน → ส่งเรื่องให้กลุ่ม ไม่ฝืนเตรียมดีล', async () => {
+  it('มะระ: ผู้ซื้อยอมขยับตามสัดส่วน → AI ยืนราคา + ตอบข้อกังวลด้วยหลักฐาน จนผ่านขั้นต่ำทุกคน', async () => {
     const res = await runNegotiation(input('bitter_gourd'), deps(), new RuleBasedMockLlm());
+    expect(res.outcome.kind).toBe('prepared');
+    expect(res.metrics.upliftVsChosenOpeningPerKg).toBeGreaterThan(1);
+  });
+
+  it('ขั้นต่ำสูงเกินกว่าที่ผู้ซื้อจ่ายได้ → ส่งเรื่องให้กลุ่ม ไม่ฝืนเตรียมดีล', async () => {
+    const high = listings.map((l) => (l.farmerId === 'F08' ? { ...l, floorPricePerKg: 25 } : l));
+    const res = await runNegotiation({ ...input('bitter_gourd'), listings: high }, deps(), new RuleBasedMockLlm());
     expect(res.status).toBe('failed');
     expect(res.outcome.kind).toBe('escalated');
   });

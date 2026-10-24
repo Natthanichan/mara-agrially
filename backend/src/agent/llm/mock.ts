@@ -240,6 +240,7 @@ export class RuleBasedMockLlm implements LlmClient {
     const bestOther = (s: SessionView) =>
       passing.find((p) => p.id !== s.id && p.evaluation!.netPerKgAvg > (s.evaluation?.netPerKgAvg ?? Infinity));
 
+    const bestRival = (s: SessionView) => Math.max(0, ...sessions.filter((o) => o.id !== s.id && o.decision !== 'walk_away').map((o) => o.price));
     for (const s of sessions) {
       if (isDone(s) || !s.evaluation) continue;
       const minPass = s.evaluation.minGrossPriceToPassAll;
@@ -269,9 +270,11 @@ export class RuleBasedMockLlm implements LlmClient {
         s.leakBlocked && s.lastAttempt !== undefined
           ? s.lastAttempt
           : prevAsk === undefined
-          ? Math.max(minPass * 1.02, (median ?? s.price) * 1.05, s.price * 1.03)
+          ? Math.max(minPass * 1.02, (median ?? s.price) * 1.05, s.price * 1.03, bestRival(s) * 1.02) // ไม่เปิดต่ำกว่าข้อเสนอจริงที่ดีที่สุดของรายอื่น
           : s.objection === 'unrealistic_ask'
           ? Math.max(minPass, s.price + (prevAsk - s.price) * 0.4)
+          : this.concedesProportionally(s)
+          ? Math.max(minPass, s.price + 0.05, prevAsk - (prevAsk - s.price) * 0.1) // ผู้ซื้อขยับตามสัดส่วนช่องว่าง → ยืนราคาไว้ใกล้เดิม ได้มากกว่า
           : Math.max(minPass, s.price + 0.05, s.price + (prevAsk - s.price) * 0.7);
       ask = r2(Math.ceil(ask * 100 - 1e-6) / 100);
 
@@ -308,6 +311,16 @@ export class RuleBasedMockLlm implements LlmClient {
       return [{ text: notes.join('\n') || 'ประเมินข้อเสนอที่เหลือ' }, ...sessions.filter((s) => !isDone(s)).map((s) => this.use('evaluate_offer', { session_id: s.id }))];
     }
     return [{ text: `ประเมินใหม่:\n${notes.join('\n')}` }, ...actions];
+  }
+
+  /** ผู้ซื้อขยับเป็นสัดส่วนของช่องว่างราคา (≥40%) หรือไม่ — ถ้าใช่ การลดราคาที่ขอเร็วเกินไปจะเสียประโยชน์ */
+  private concedesProportionally(s: SessionView): boolean {
+    const n = s.prices.length;
+    const ask = s.asks[s.asks.length - 1];
+    if (n < 2 || ask === undefined || s.decision === 'final_offer') return false;
+    const before = s.prices[n - 2]!;
+    const gap = ask - before;
+    return gap > 0 && (s.prices[n - 1]! - before) / gap >= 0.4;
   }
 
   private get useEvidence() {

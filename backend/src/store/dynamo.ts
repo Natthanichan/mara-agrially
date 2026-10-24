@@ -9,6 +9,7 @@
 //   BUYERREQ#<uid>        / <createdAt>#<id>  ความต้องการซื้อของผู้ซื้อ (ดูของตัวเอง)
 //   BUYERREQ#OPEN#<crop>  / <createdAt>#<id>  ดัชนีตามพืช (ไว้จับคู่แจ้งเตือนผู้ซื้อในขั้นต่อไป)
 //   FGROUP#<code>         / META              กลุ่มเพื่อนเกษตรกรที่ผู้ใช้สร้าง (members เป็น string set)
+//   BUYERHIST#<buyer>#<crop> / <at>#<dealId>   ผลการเจรจากับผู้ซื้อแต่ละดีล (หลักฐานประวัติ)
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -22,7 +23,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import type { LedgerEvent } from '../core/ledger.js';
 import type { NabcRecord, SnapshotStore } from '../market/nabcClient.js';
-import type { BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
+import type { BuyerOutcome, BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
 
 type Doc = Pick<DynamoDBDocumentClient, 'send'>;
 
@@ -200,6 +201,19 @@ export class DynamoDealStore implements DealStore {
       new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERREQ#OPEN#${crop}` }, ScanIndexForward: false, Limit: limit }),
     );
     return (r.Items ?? []).map((i) => ({ id: String(i.id), userId: String(i.userId), quantityKg: Number(i.quantityKg), offerPerKg: Number(i.offerPerKg), location: String(i.location ?? '') }));
+  }
+
+  async recordBuyerOutcomes(rows: BuyerOutcome[]) {
+    for (const r of rows) {
+      await this.db.send(new PutCommand({ TableName: this.table, Item: { pk: `BUYERHIST#${r.buyerId}#${r.crop}`, sk: `${r.at}#${r.dealId}`, ...r } }));
+    }
+  }
+
+  async listBuyerOutcomes(buyerId: string, crop: BuyerOutcome['crop'], limit: number) {
+    const r = await this.db.send(
+      new QueryCommand({ TableName: this.table, KeyConditionExpression: 'pk = :p', ExpressionAttributeValues: { ':p': `BUYERHIST#${buyerId}#${crop}` }, ScanIndexForward: false, Limit: limit }),
+    );
+    return (r.Items ?? []).map(({ pk: _p, sk: _s, ...rest }) => rest as unknown as BuyerOutcome);
   }
 
   async createFarmerGroup(g: FarmerGroup) {

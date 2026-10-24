@@ -138,3 +138,19 @@ describe('ไฟล์ที่สร้างอัตโนมัติ', () =
     expect(chunkFiles(KNOWLEDGE_FILES)).toEqual(fromDisk);
   });
 });
+
+describe('ประวัติการเจรจาจริง', () => {
+  it('จบดีลแล้วบันทึกราคาเปิด/สุดท้ายของผู้ซื้อแต่ละราย และดีลถัดไปดึงมาเป็นหลักฐาน E-HIST', async () => {
+    const { ctx, store } = makeCtx();
+    const { id } = await startDeal(ctx, { crop: 'rice_hommali' });
+    const rows = await store.listBuyerOutcomes('B-C', 'rice_hommali', 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ dealId: id, openingPerKg: 18.4, chosen: true });
+    expect(rows[0]!.finalPerKg).toBeGreaterThan(18.4);
+
+    const { id: second } = await startDeal(ctx, { crop: 'rice_hommali' });
+    const events = await store.listEvents(second);
+    const histResults = events.filter((e) => e.type === 'agent.tool_result' && e.data.tool === 'get_negotiation_history');
+    expect(histResults.some((e) => JSON.stringify(e.data).includes('E-HIST-B-C'))).toBe(true);
+  });
+});

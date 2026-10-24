@@ -1,11 +1,12 @@
 import type { LedgerEvent } from '../core/ledger.js';
-import type { BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
+import type { BuyerOutcome, BuyerRequest, DealRecord, DealStore, FarmerGroup, LineSession } from './types.js';
 
 export class MemoryDealStore implements DealStore {
   sessions = new Map<string, LineSession>();
   webhookEvents = new Set<string>();
   buyerRequests: BuyerRequest[] = [];
   groups = new Map<string, FarmerGroup>();
+  outcomes: BuyerOutcome[] = [];
   deals = new Map<string, DealRecord>();
   events = new Map<string, LedgerEvent[]>();
   counters = new Map<string, number>();
@@ -77,6 +78,12 @@ export class MemoryDealStore implements DealStore {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
       .map(({ id, userId, quantityKg, offerPerKg, location }) => ({ id, userId, quantityKg, offerPerKg, location }));
+  }
+  async recordBuyerOutcomes(rows: BuyerOutcome[]) {
+    this.outcomes.push(...structuredClone(rows));
+  }
+  async listBuyerOutcomes(buyerId: string, crop: BuyerOutcome['crop'], limit: number) {
+    return this.outcomes.filter((o) => o.buyerId === buyerId && o.crop === crop).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit).map((o) => structuredClone(o));
   }
   async createFarmerGroup(g: FarmerGroup) {
     if (this.groups.has(g.code)) return false;

@@ -8,7 +8,7 @@ import { activeMembers } from '../core/grouping.js';
 import type { Deduction, DealTerms, Farmer, Group, Listing } from '../core/types.js';
 import type { MarketReference } from '../market/nabcClient.js';
 import type { KnowledgeIndex } from '../rag/search.js';
-import { checkCounterPrice, checkMessageLeak, extractNumbers, type GuardrailViolation } from './guardrails.js';
+import { checkCounterPrice, checkMessageLeak, extractNumbers, numbersNeedingEvidence, type GuardrailViolation } from './guardrails.js';
 import { dateNumbers, EvidenceRegistry, STRATEGIES, thaiDay, unverifiedNumbers, type Evidence, type Strategy } from './evidence.js';
 import { CROP_LABEL_TH } from '../data/synthetic.js';
 import type { ToolSpec } from './llm/types.js';
@@ -385,7 +385,7 @@ export async function executeTool(
         id: `E-HIST-${buyerId}`,
         kind: 'history',
         label: `ครั้งล่าสุดที่ระบบบันทึก (${last.at.slice(0, 10)}) ผู้ซื้อรายนี้ให้ราคาสุดท้าย ${last.finalPerKg.toFixed(2)} บาท/กก.`,
-        say: `ครั้งก่อนเราตกลงกันที่ ${last.finalPerKg.toFixed(2)} บาท/กก.`,
+        say: last.chosen && last.decision === 'accept' ? `ครั้งก่อนเราตกลงกันที่ ${last.finalPerKg.toFixed(2)} บาท/กก.` : `ครั้งก่อนท่านให้ราคาสุดท้ายที่ ${last.finalPerKg.toFixed(2)} บาท/กก.`,
         value: last.finalPerKg,
         verified: true,
         source: 'บันทึกการเจรจาในระบบ',
@@ -466,7 +466,7 @@ export async function executeTool(
           maxRounds: st.maxRoundsPerBuyer,
         }) ?? checkMessageLeak(message, st.privateNumbers(), allowed);
       if (!violation) {
-        const bad = unverifiedNumbers(extractNumbers(message), [...allowed, ...st.evidence.numbers()]);
+        const bad = unverifiedNumbers(numbersNeedingEvidence(message), [...allowed, ...st.evidence.numbers()]);
         if (bad.length) {
           violation = { code: 'unverified_number', message: `ข้อความมีตัวเลข ${bad.join(', ')} ที่ไม่มีในหลักฐาน ห้ามแต่งตัวเลข ใช้เฉพาะตัวเลขจากหลักฐานที่อ้าง หรือเขียนโดยไม่ระบุตัวเลข` };
         }

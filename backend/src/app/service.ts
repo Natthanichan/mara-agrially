@@ -119,6 +119,29 @@ export async function startDeal(ctx: AppContext, body: { crop?: unknown }, opts:
   return { id };
 }
 
+/** ประวัติการเจรจาจริงจากที่เก็บข้อมูล → ให้ Agent อ้างเป็นหลักฐานได้ */
+const storeHistory = (store: DealStore) => ({
+  forBuyer: async (buyerId: string, crop: Crop) => (await store.listBuyerOutcomes(buyerId, crop, 5)).map(({ dealId, at, openingPerKg, finalPerKg, decision, chosen }) => ({ dealId, at, openingPerKg, finalPerKg, decision, chosen })),
+});
+
+/** บันทึกราคาเปิด/ราคาสุดท้ายของผู้ซื้อแต่ละรายในดีลนี้ — ล้มเหลวได้โดยไม่กระทบผลเจรจา */
+async function recordOutcomes(ctx: AppContext, dealId: string, crop: Crop, trace: { type: string; data: Record<string, unknown> }[], outcome: { kind: string; buyerId?: string }, at: string) {
+  try {
+    const byBuyer = new Map<string, { opening: number; final: number; decision: string }>();
+    for (const t of trace) {
+      if (t.type !== 'buyer_response') continue;
+      const id = String(t.data.buyerId);
+      const price = Number(t.data.pricePerKg);
+      const cur = byBuyer.get(id);
+      byBuyer.set(id, { opening: cur?.opening ?? price, final: price, decision: String(t.data.decision) });
+    }
+    const rows = [...byBuyer].map(([buyerId, v]) => ({ buyerId, crop, dealId, at, openingPerKg: v.opening, finalPerKg: v.final, decision: v.decision, chosen: outcome.kind === 'prepared' && outcome.buyerId === buyerId }));
+    if (rows.length) await ctx.store.recordBuyerOutcomes(rows);
+  } catch (e) {
+    console.error('record buyer outcomes failed', (e as Error).message);
+  }
+}
+
 /** แจ้งผลหาเกษตรกรใน LINE — ล้มเหลวได้โดยไม่ทำให้ดีลพัง */
 async function notifyReady(ctx: AppContext, id: string) {
   try {
@@ -140,7 +163,9 @@ export async function runDeal(ctx: AppContext, id: string): Promise<void> {
   const ledger = new Ledger(now);
   let chain: Promise<void> = Promise.resolve();
   try {
-    const res = await runNegotiation({ dealId: id, group, farmers, listings: ls, date: deal.marketDate }, ctx.agentDeps(), ctx.llm(), {
+    const base = ctx.agentDeps();
+    const deps = { ...base, history: base.history ?? storeHistory(ctx.store) };
+    const res = await runNegotiation({ dealId: id, group, farmers, listings: ls, date: deal.marketDate }, deps, ctx.llm(), {
       ledger,
       now,
       // เขียนเหตุการณ์ตามลำดับทีละรายการ เพื่อให้หน้าเว็บเห็นความคืบหน้าแบบสด
@@ -152,6 +177,7 @@ export async function runDeal(ctx: AppContext, id: string): Promise<void> {
     });
     await chain;
     await ctx.store.updateDeal(id, { status: res.status, outcome: res.outcome, metrics: res.metrics, updatedAt: now().toISOString() });
+    await recordOutcomes(ctx, id, deal.crop, res.trace, res.outcome, now().toISOString());
   } catch (e) {
     await chain.catch(() => undefined);
     await ctx.store.updateDeal(id, { status: 'failed', error: (e as Error).message, updatedAt: now().toISOString() });

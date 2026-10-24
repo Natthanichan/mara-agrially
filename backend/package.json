@@ -12,7 +12,8 @@
     "agent:demo": "tsx scripts/demo.ts",
     "demo:export": "tsx scripts/export-demo.ts",
     "build:assets": "tsx scripts/gen-assets.ts && tsx scripts/export-demo.ts",
-    "dev": "tsx scripts/local-server.ts"
+    "dev": "tsx scripts/local-server.ts",
+    "eval": "tsx scripts/eval.ts"
   },
   "keywords": [],
   "author": "",
