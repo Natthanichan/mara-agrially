@@ -377,7 +377,7 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
       <p class="small muted">${sc.deal.deductions.length ? esc(sc.deal.deductions.join(', ')) + ' · ' : ''}สุทธิเฉลี่ย <b class="num">${baht(sc.deal.netAvg)}</b> บาท/กก.</p>
       <ul class="farmers">${sc.farmers.map((f) => `<li class="${a[f.id] === 'no' ? 'out' : ''}">
           <div class="fname"><b>${esc(f.name)}</b><span class="small muted">${esc(f.district)} · <span class="num">${kg(f.kg)}</span> กก. · ${f.passesFloor ? 'ผ่านขั้นต่ำ ✓' : 'ต่ำกว่าขั้นต่ำ'}</span></div>
-          <div class="fnet"><b class="num">${baht(f.netPerKg)}</b><span class="small muted">บาท/กก. · รับ <span class="num">${baht(f.netTotal, 0)}</span> บาท</span></div>
+          <div class="fnet"><b class="num">${baht(f.netPerKg)}</b><span class="small muted">บาท/กก. · รับ <span class="num">${baht(f.netTotal, 0)}</span> บาท</span>${f.account ? `<span class="small muted">โอนตรงเข้า ${esc(f.account)}</span>` : ''}</div>
           <span class="seg" role="group" aria-label="อนุมัติของ ${esc(f.name)}"><button type="button" class="yes" data-f="${f.id}" data-v="yes" aria-pressed="${a[f.id] === 'yes'}">ตกลง</button><button type="button" class="no" data-f="${f.id}" data-v="no" aria-pressed="${a[f.id] === 'no'}">ไม่</button></span>
         </li>`).join('')}</ul>
       <p class="small muted" style="margin-top:8px">ผู้ซื้อโอนเงินตรงเข้าบัญชีของเกษตรกรแต่ละคน ระบบไม่ถือเงิน · ราคาขั้นต่ำของแต่ละคนไม่แสดงและไม่ส่งให้ผู้ซื้อ</p>

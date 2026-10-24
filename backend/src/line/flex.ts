@@ -149,6 +149,13 @@ export function offerMessage(dealId: string, o: FarmerOffer, memberNote: string,
     row('คุณได้สุทธิ', `${baht(m.netPerKg)} บาท/กก.`, true),
     row('รวมที่คุณได้', `${baht(m.netTotal)} บาท (${qty(m.quantityKg)})`, true),
     row('ขั้นต่ำของคุณ', `${baht(m.floorPerKg)} บาท/กก. ${m.passesFloor ? '✓ ผ่าน' : '✗ ไม่ผ่าน'}`),
+    ...(o.checks?.length
+      ? [
+          { type: 'separator' },
+          { type: 'text', text: `น้องมะระตรวจก่อนปิดดีล (${o.checks.filter((c) => c.ok).length}/${o.checks.length} ผ่าน)`, weight: 'bold', size: 'sm', color: o.checks.every((c) => c.ok) ? '#1B5E20' : '#8F5400' },
+          ...o.checks.map((c) => ({ type: 'text', text: `${c.ok ? '✓' : '⚠'} ${c.label}: ${c.detail}`, size: 'xs', color: c.ok ? '#333333' : '#B0261B', wrap: true })),
+        ]
+      : []),
     ...(o.marketMedianPerKg !== undefined ? [row('ราคาตลาดอ้างอิง (มัธยฐาน)', `${baht(o.marketMedianPerKg)} บาท/กก.`)] : []),
     { type: 'text', text: `ทั้งกลุ่ม ${o.group.memberCount} คน ${qty(o.group.totalKg)} สุทธิเฉลี่ย ${baht(o.group.netPerKgAvg)} บาท/กก.`, size: 'xs', color: '#666666', wrap: true },
     ...(how.length
@@ -554,3 +561,24 @@ export const rateBuyerMessage = (dealId: string, buyerName: string): LineMessage
     items: (Object.keys(FEEDBACK_TH) as FeedbackKind[]).map((k) => ({ type: 'action', action: { type: 'postback', label: FEEDBACK_TH[k].slice(0, 20), data: postbackData('rate_buyer', dealId, undefined, k), displayText: FEEDBACK_TH[k] } })),
   },
 });
+
+// ---------- ใบแบ่งจ่าย (Transparency by Design) ----------
+
+export function paymentSplitMessage(o: FarmerOffer): LineMessage {
+  const rows = (o.payouts ?? []).map((p) => row(`${p.label} · ${qty(p.quantityKg)}`, `${int(p.amountBaht)} บาท`, p.mine));
+  const accounts = (o.payouts ?? []).map((p) => ({ type: 'text', text: `${p.label}: โอนเข้า ${p.account}`, size: 'xxs', color: '#666666', wrap: true }));
+  const total = (o.payouts ?? []).reduce((s, p) => s + p.amountBaht, 0);
+  return bubble(
+    'ใบแบ่งจ่าย: ผู้ซื้อโอนตรงรายคน 💸',
+    [
+      { type: 'text', text: `${o.buyerName} โอนเงินตรงเข้าบัญชีเกษตรกรแต่ละคน ตามน้ำหนักที่ส่งมอบจริง หลังหักค่ารถและส่วนหักแล้ว`, size: 'xs', wrap: true },
+      ...rows,
+      { type: 'separator' },
+      row('รวมทั้งกลุ่ม', `${int(total)} บาท`, true),
+      ...accounts,
+      { type: 'text', text: 'น้องมะระไม่ถือเงินแม้แต่บาทเดียว ไม่มีคนกลางรับเงินแทนกลุ่ม', weight: 'bold', size: 'xs', color: '#1B5E20', wrap: true },
+    ],
+    [],
+    `ใบแบ่งจ่าย: ${o.buyerName} โอนตรงรายคน รวม ${int(total)} บาท`,
+  );
+}

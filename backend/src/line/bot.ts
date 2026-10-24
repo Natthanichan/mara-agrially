@@ -78,6 +78,7 @@ import {
   farmProfileMessage,
   askActualQuantity,
   rateBuyerMessage,
+  paymentSplitMessage,
 } from './flex.js';
 import { FEEDBACK_TH, reputationLine, type FeedbackKind } from '../core/reputation.js';
 import { expectedYieldKg, monthTh, parseRai, recommendCrops, upcomingMonths, type FarmProfile, type Soil } from '../core/farmProfile.js';
@@ -266,6 +267,16 @@ export class LineBot implements LineHooks {
     }
     // ยังไม่ได้เลือกบทบาท และข้อความไม่เกี่ยวกับผลผลิตเลย → ให้เลือกบทบาทก่อน
     return reply([r.problems.length >= 3 ? (session?.role ? helpMessage() : roleMessage()) : problemsMessage(r.problems)]);
+  }
+
+  /** ใบแบ่งจ่ายหลังตกลงดีล — ล้มเหลวได้โดยไม่กระทบการอนุมัติ */
+  private async splitMessage(dealId: string, farmerId: string): Promise<LineMessage[]> {
+    try {
+      return [paymentSplitMessage(await getFarmerOffer(this.getCtx(), dealId, farmerId))];
+    } catch (e) {
+      console.error('payment split failed:', (e as Error).message);
+      return [];
+    }
   }
 
   private nowDate() {
@@ -891,6 +902,7 @@ export class LineBot implements LineHooks {
         if (s?.farmProfile) await this.save(userId, { farmProfile: { ...s.farmProfile, deliveries: s.farmProfile.deliveries + 1, updatedAt: this.now() } }); // ประวัติการส่งมอบ
         return reply([
           text(['อนุมัติแล้ว ✓ ดีลตกลงครบทุกคน 🎉', 'สถานะ: ตกลงดีลแล้ว · ส่งมอบ: ยังไม่เริ่ม · ชำระเงิน: ยังไม่ถึงกำหนด (แยกสถานะกัน)', 'ผู้ซื้อโอนเงินตรงเข้าบัญชีของคุณหลังส่งมอบ ระบบไม่ถือเงิน', 'ทุกขั้นถูกบันทึกใน ledger แบบ hash chain', '', MOCK_NOTE].join('\n')),
+          ...(await this.splitMessage(deal.id, farmerId)),
           ...(deal.outcome?.kind === 'prepared' ? [rateBuyerMessage(deal.id, deal.outcome.buyerName)] : []),
         ]);
       }

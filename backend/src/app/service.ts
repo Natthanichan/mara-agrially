@@ -2,6 +2,7 @@
 // ทุก dependency ส่งเข้ามา (store, LLM, ผู้ซื้อ, ตลาด) จึงเทสได้ครบโดยไม่ต้องใช้ AWS
 
 import { DEFAULT_BUYERS, MockBuyerApi } from '../buyer/mockBuyer.js';
+import { checkDealAnomalies, type DealCheck } from '../core/anomaly.js';
 import { computeReputation, seedFeedback, type Reputation } from '../core/reputation.js';
 import { canFinalize, nextDealStatus } from '../core/stateMachine.js';
 import { checkPriceFloor, computeNetPerFarmer } from '../core/pricing.js';
@@ -327,6 +328,10 @@ export interface FarmerOffer {
   /** ความน่าเชื่อถือของผู้ซื้อ (Buyer Reputation Memory) */
   buyerReputation?: Reputation;
   paymentTermDays?: number;
+  /** ผลตรวจความผิดปกติก่อนปิดดีล (กฎในโค้ด) */
+  checks?: DealCheck[];
+  /** ใบแบ่งจ่าย: ผู้ซื้อโอนตรงเข้าบัญชีเกษตรกรแต่ละคน ตามน้ำหนักที่ส่งจริง (ระบบไม่ถือเงิน) */
+  payouts?: { label: string; account: string; quantityKg: number; amountBaht: number; mine: boolean }[];
 }
 
 /** ข้อมูลดีลที่ส่งให้เกษตรกรอ่านก่อนกดอนุมัติ */
@@ -349,6 +354,13 @@ export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: stri
   const fromProvince = farmers.find((f) => f.id === farmerId)?.province;
   const buyerId = deal.outcome.buyerId;
   const buyerCfg = DEFAULT_BUYERS.find((b) => b.id === buyerId);
+  const rep = await getBuyerReputation(ctx, buyerId);
+  let ledgerVerified = true;
+  try {
+    Ledger.from(await ctx.store.listEvents(id));
+  } catch {
+    ledgerVerified = false;
+  }
   const toProvince = buyerCfg?.province;
   const transport = trip && fromProvince
     ? { fromProvince, ...(toProvince ? { toProvince } : {}), tripCostBaht: trip.totalCost, tripKg, tripFarmers: trip.farmerIds.length, myTotalBaht: Math.round(mine.transportPerKg * mine.quantityKg) }
@@ -362,8 +374,25 @@ export async function getFarmerOffer(ctx: AppContext, id: string, farmerId: stri
     ...(deal.metrics?.marketMedianPerKg !== undefined ? { marketMedianPerKg: deal.metrics.marketMedianPerKg } : {}),
     ...(transport ? { transport } : {}),
     myGrossBaht: Math.round(st.terms.pricePerKg * mine.quantityKg),
-    buyerReputation: await getBuyerReputation(ctx, buyerId),
+    buyerReputation: rep,
     ...(buyerCfg ? { paymentTermDays: buyerCfg.paymentTermDays } : {}),
+    checks: checkDealAnomalies({
+      pricePerKg: st.terms.pricePerKg,
+      ...(deal.metrics?.marketMedianPerKg !== undefined ? { marketMedianPerKg: deal.metrics.marketMedianPerKg } : {}),
+      deductions: st.terms.deductions,
+      totalKg,
+      ...(buyerCfg ? { paymentTermDays: buyerCfg.paymentTermDays, buyerMinKg: buyerCfg.minKg, buyerMaxKg: buyerCfg.maxKg } : {}),
+      passesAllFloors: checkPriceFloor(active, dealListings(deal), st.terms).passes,
+      buyerLevel: rep.level,
+      ledgerVerified,
+    }),
+    payouts: nets.map((n, i) => ({
+      label: n.farmerId === farmerId ? 'คุณ' : `สมาชิก ${i + 1}`,
+      account: farmers.find((f) => f.id === n.farmerId)?.bankAccountMasked ?? '-',
+      quantityKg: n.quantityKg,
+      amountBaht: Math.round(n.netTotal),
+      mine: n.farmerId === farmerId,
+    })),
   };
 }
 

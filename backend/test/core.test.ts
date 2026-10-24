@@ -173,3 +173,13 @@ describe('Ledger: hash ไม่ขึ้นกับลำดับคีย์
     expect(() => Ledger.from(stored)).toThrow('hash chain');
   });
 });
+
+describe('ตรวจความผิดปกติก่อนปิดดีล', () => {
+  it('ราคาต่ำกว่าตลาดมาก ส่วนหักเกิน 3% เครดิตนาน ผู้ซื้อประวัติไม่ดี → เตือนทุกข้อ · ดีลปกติ → ผ่านหมด', async () => {
+    const { checkDealAnomalies } = await import('../src/core/anomaly.js');
+    const bad = checkDealAnomalies({ pricePerKg: 14, marketMedianPerKg: 17.8, deductions: [{ kind: 'percent', label: 'หักความชื้น', percent: 4 }], totalKg: 40_000, paymentTermDays: 30, buyerMinKg: 10_000, passesAllFloors: false, buyerLevel: 'low', ledgerVerified: true });
+    expect(bad.filter((c) => !c.ok).map((c) => c.label)).toEqual(['ราคาเทียบตลาด', 'ส่วนหักแฝง', 'เครดิตจ่ายเงิน', 'ราคาขั้นต่ำของสมาชิก', 'ประวัติผู้ซื้อ']);
+    const good = checkDealAnomalies({ pricePerKg: 17.9, marketMedianPerKg: 17.8, deductions: [], totalKg: 40_000, paymentTermDays: 7, buyerMinKg: 10_000, passesAllFloors: true, buyerLevel: 'high', ledgerVerified: true });
+    expect(good.every((c) => c.ok)).toBe(true);
+  });
+});

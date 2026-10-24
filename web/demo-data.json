@@ -12,7 +12,7 @@
    "status": "pending_approval",
    "outcome": "prepared",
    "group": {
-    "id": "G-rice_hommali-A-3",
+    "id": "G-rice_hommali-A-4",
     "crop": "rice_hommali",
     "cropLabel": "ข้าวเปลือกหอมมะลิ",
     "grade": "A",
@@ -132,7 +132,7 @@
      "B-C": 5
     },
     "guardrailBlocks": 1,
-    "elapsedMs": 26,
+    "elapsedMs": 27,
     "marketMedianPerKg": 17.65,
     "finalNetPerKgAvg": 17.99,
     "bestOpeningNetPerKgAvg": 17.3,
@@ -875,7 +875,7 @@
      "buyerName": "โรงสีจำลอง C",
      "summary": "แนะนำ โรงสีจำลอง C: ราคา 18.64 บาท/กก. (หักความชื้น 1.5%)\nราคาสุทธิหลังค่าขนส่งและส่วนหัก เฉลี่ย 17.99 บาท/กก. ทุกคนได้ไม่ต่ำกว่าขั้นต่ำของตัวเอง\nราคากลางตลาดวันนี้ 17.65 บาท/กก. (NABC)\nเทียบรายอื่น: โรงสีจำลอง A สุทธิเฉลี่ย 16.45 (ต่ำกว่าขั้นต่ำบางคน) · ผู้ส่งออกจำลอง B สุทธิเฉลี่ย 17.76\nกรุณาตรวจสอบและกดอนุมัติ ปฏิเสธ หรือขอให้เจรจาใหม่",
      "evaluation": {
-      "sessionId": "NS-3-B-C-G-rice_hommali-A-3",
+      "sessionId": "NS-3-B-C-G-rice_hommali-A-4",
       "buyerId": "B-C",
       "buyerDecision": "accept",
       "pricePerKg": 18.64,
@@ -1001,7 +1001,7 @@
      "B-D": 4
     },
     "guardrailBlocks": 0,
-    "elapsedMs": 2,
+    "elapsedMs": 4,
     "finalNetPerKgAvg": 19.11,
     "bestOpeningNetPerKgAvg": 16.04,
     "upliftVsBestOpeningPerKg": 3.07,
@@ -1351,7 +1351,7 @@
    "status": "failed",
    "outcome": "escalated",
    "group": {
-    "id": "G-rice_hommali-A-3",
+    "id": "G-rice_hommali-A-4",
     "crop": "rice_hommali",
     "cropLabel": "ข้าวเปลือกหอมมะลิ",
     "grade": "A",
@@ -1413,7 +1413,7 @@
      "B-C": 1
     },
     "guardrailBlocks": 0,
-    "elapsedMs": 4,
+    "elapsedMs": 6,
     "marketMedianPerKg": 17.65,
     "bestOpeningNetPerKgAvg": 17.3,
     "strategies": {
@@ -1797,7 +1797,7 @@
    "status": "failed",
    "outcome": "escalated",
    "group": {
-    "id": "G-rice_hommali-A-3",
+    "id": "G-rice_hommali-A-4",
     "crop": "rice_hommali",
     "cropLabel": "ข้าวเปลือกหอมมะลิ",
     "grade": "A",
@@ -1857,7 +1857,7 @@
      "B-A": 0
     },
     "guardrailBlocks": 4,
-    "elapsedMs": 1,
+    "elapsedMs": 2,
     "bestOpeningNetPerKgAvg": 15.43,
     "strategies": {},
     "repeatedMoves": 0,
@@ -1911,7 +1911,7 @@
      "kind": "tool_error",
      "at": "2026-10-21T02:04:44.200Z",
      "tool": "escalate_to_farmers",
-     "error": "ยังส่งเรื่องให้เกษตรกรไม่ได้ เพราะยังไม่ได้ต่อรองกับผู้ซื้อ B-A (session NS-1-B-A-G-rice_hommali-A-3, เสนอ 15.8 บาท/กก.) ข้อเสนอแรกมักต่อรองได้ ให้ submit_counter กับรายที่ราคาสุทธิใกล้ขั้นต่ำที่สุดก่อน ใช้ minGrossPriceToPassAll จาก evaluate_offer เป็นเป้า (ห้ามบอกตัวเลขนี้กับผู้ซื้อ) และถ้ามีส่วนหักแบบเหมาให้ใส่ contest_deductions"
+     "error": "ยังส่งเรื่องให้เกษตรกรไม่ได้ เพราะยังไม่ได้ต่อรองกับผู้ซื้อ B-A (session NS-1-B-A-G-rice_hommali-A-4, เสนอ 15.8 บาท/กก.) ข้อเสนอแรกมักต่อรองได้ ให้ submit_counter กับรายที่ราคาสุทธิใกล้ขั้นต่ำที่สุดก่อน ใช้ minGrossPriceToPassAll จาก evaluate_offer เป็นเป้า (ห้ามบอกตัวเลขนี้กับผู้ซื้อ) และถ้ามีส่วนหักแบบเหมาให้ใส่ contest_deductions"
     },
     {
      "kind": "outcome",

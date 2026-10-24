@@ -218,6 +218,12 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     expect(asText(offer)).toMatch(/จ\.ร้อยเอ็ด → จ\.\S+/);
     expect(asText(offer)).toMatch(/รวม [\d,]+ บาท/);
     expect(asText(offer)).toContain('ยอดก่อนหัก');
+    // ผลตรวจความผิดปกติก่อนปิดดีล (กฎในโค้ด)
+    expect(asText(offer)).toContain('น้องมะระตรวจก่อนปิดดีล');
+    expect(asText(offer)).toContain('ราคาขั้นต่ำของสมาชิก');
+    expect(asText(offer)).toContain('hash chain ตรวจผ่าน');
+    console.log('offer bubble bytes', Buffer.byteLength(JSON.stringify((offer as any).contents)));
+    expect(Buffer.byteLength(JSON.stringify((offer as any).contents))).toBeLessThan(30_000); // ขีดจำกัดขนาด bubble ของ LINE
 
     const deal = (await store.getDeal('deal-1'))!;
     expect(deal).toMatchObject({ status: 'pending_approval', lineUserId: 'U-farmer', lineFarmerId: 'F01' });
@@ -225,6 +231,14 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
 
     await tap(buttons(offer)[0]!.data);
     expect(asText(last().messages[0]!)).toContain('ตกลงครบทุกคน');
+    // ใบแบ่งจ่าย: ผู้ซื้อโอนตรงรายคน รวม 4 คน และเห็นบัญชีของตัวเอง
+    const split = asText(last().messages[1]!);
+    expect(split).toContain('ใบแบ่งจ่าย');
+    expect(split).toContain('ธ.ก.ส. xxx-x-x1234-x');
+    expect(split).toContain('สมาชิก 2');
+    expect(split).toContain('ไม่ถือเงินแม้แต่บาทเดียว');
+    expect(split).not.toContain('บุญมา'); // ไม่เปิดชื่อสมาชิกคนอื่น
+    expect(last().messages.length).toBeLessThanOrEqual(5); // LINE ตอบได้ไม่เกิน 5 ข้อความ
     const after = (await store.getDeal('deal-1'))!;
     expect(after).toMatchObject({ status: 'agreed', deliveryStatus: 'not_started', paymentStatus: 'not_due' });
     expect(Object.keys(after.approvals).sort()).toEqual(['F01', 'F02', 'F03', 'F04']);
