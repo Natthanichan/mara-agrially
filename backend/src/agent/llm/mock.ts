@@ -291,11 +291,20 @@ export class RuleBasedMockLlm implements LlmClient {
 
       const move = this.useEvidence ? this.pickMove(s, sessions, median, contest, prevAsk === undefined) : { strategy: contest ? 'contest_deduction' : prevAsk === undefined ? 'anchor' : 'final_push', ids: [] as string[], why: 'เจรจาด้วยตัวเลขอย่างเดียว (baseline)' };
       const said = move.ids.map((id) => this.evidence.get(id)).filter((l): l is string => !!l && !/^E-/.test(l));
+      // เขียนให้เหมือนคนคุยธุรกิจทางแชต: ทักครั้งแรก ตอบข้อกังวล เล่าเหตุผลเป็นประโยคต่อกัน แล้วค่อยเสนอราคา
+      const opening = prevAsk === undefined && !s.leakBlocked;
+      const lead = move.strategy === 'address_objection' || move.strategy === 'conditional_concession' ? OBJECTION_REPLY[s.objection ?? ''] ?? '' : '';
+      const reasons = said.length ? `${said.join(' และ')}ค่ะ` : '';
+      const offerLine =
+        move.strategy === 'final_push' ? `ขอปิดที่ ${fmt(ask)} บาท/กก. นะคะ จะได้รีบนัดส่งของกันเลย`
+        : opening ? `เลยอยากขอที่ ${fmt(ask)} บาท/กก. ค่ะ พอไหวไหมคะ`
+        : `ขอเป็น ${fmt(ask)} บาท/กก. ได้ไหมคะ`;
       const parts = [
-        move.strategy === 'address_objection' || move.strategy === 'conditional_concession' ? OBJECTION_REPLY[s.objection ?? ''] ?? '' : '',
-        ...said,
-        `ขอเสนอ ${fmt(ask)} บาท/กก.`,
-        contest ? 'และขอให้วัดความชื้นจริงต่อหน้าตัวแทนกลุ่มแทนการหักเหมา' : '',
+        opening ? 'สวัสดีค่ะ น้องมะระจากกลุ่มเกษตรกรนะคะ' : '',
+        lead,
+        reasons,
+        offerLine,
+        contest ? 'อีกเรื่องคือรบกวนวัดความชื้นจริงต่อหน้าตัวแทนกลุ่มแทนการหักเหมาได้ไหมคะ' : '',
       ].filter(Boolean);
       actions.push(
         this.use('submit_counter', {
@@ -305,7 +314,7 @@ export class RuleBasedMockLlm implements LlmClient {
           evidence_ids: move.ids,
           price_per_kg: ask,
           ...(contest ? { contest_deductions: ['หักความชื้น'] } : {}),
-          message: s.leakBlocked ? `ขอเสนอ ${fmt(ask)} บาท/กก.` : parts.join(' '),
+          message: s.leakBlocked ? `ขอเป็น ${fmt(ask)} บาท/กก. ได้ไหมคะ` : parts.join(' '),
         }),
       );
       notes.push(`${s.buyer}: ตอนนี้ ${fmt(s.price)} → เสนอ ${fmt(ask)}${contest ? ' + ขอลดหักความชื้น' : ''}`);

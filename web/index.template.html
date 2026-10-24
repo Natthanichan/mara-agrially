@@ -108,6 +108,31 @@ header.top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-cont
 .quotes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .quotes span { font-size: 13px; padding: 2px 8px; border-radius: 6px; background: var(--sunk); }
 .step.hidden-step { display: none; }
+/* มุมมองแชต: น้องมะระ (ขวา) ↔ ผู้ซื้อ (ซ้าย) · ขั้นตอนของระบบเป็นบรรทัดเล็กตรงกลาง */
+.timeline { gap: 8px; }
+.step.cmsg, .step.cnote { display: flex; gap: 8px; }
+.step.cmsg { align-items: flex-end; }
+.step.cmsg.me { flex-direction: row-reverse; }
+.avatar { width: 32px; height: 32px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: 13px; font-weight: 700; background: var(--buyer-soft); color: var(--buyer); }
+.step.cmsg.me .avatar { background: var(--accent-soft); color: var(--accent); }
+.bubble { max-width: min(560px, 84%); background: var(--surface); border: 1px solid var(--line); border-radius: 18px 18px 18px 6px; padding: 9px 13px; }
+.step.cmsg.me .bubble { background: var(--accent-soft); border-color: transparent; border-radius: 18px 18px 6px 18px; }
+.bubble .who { font-size: 12px; color: var(--muted); margin-bottom: 3px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.bubble .who b { color: var(--ink); font-weight: 600; }
+.bubble .text { font-size: 15px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble .meta { margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); }
+.bubble .tag { font-family: var(--mono); font-size: 12px; padding: 1px 7px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--ink); }
+.step.cmsg.me .bubble .tag { border-color: transparent; }
+.bubble details { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.bubble summary { cursor: pointer; font-size: 12px; }
+.bubble details ul { margin: 6px 0 0; padding-left: 18px; }
+.step.cnote { justify-content: center; }
+.step.cnote .cn { font-size: 12.5px; color: var(--muted); background: var(--sunk); border-radius: 999px; padding: 4px 12px; max-width: 92%; text-align: center; line-height: 1.5; }
+.step.cnote.bad .cn { background: var(--danger-soft); color: var(--danger); border-radius: 12px; }
+.step.cnote.ok .cn { background: var(--accent-soft); color: var(--accent); font-weight: 600; border-radius: 12px; }
+.step.cnote.warn .cn { background: var(--warn-soft); color: var(--warn); font-weight: 600; border-radius: 12px; }
+.step.cnote details { display: inline; } .step.cnote summary { display: inline; cursor: pointer; text-decoration: underline dotted; }
+.step.cnote .chits { text-align: left; margin-top: 6px; }
 @media (prefers-reduced-motion: no-preference) { .step.reveal { animation: rise .35s ease-out; } @keyframes rise { from { opacity: .2; transform: translateY(6px); } to { opacity: 1; transform: none; } } }
 @media (max-width: 560px) { .step { grid-template-columns: minmax(0, 1fr); gap: 4px; } .step .when { flex-direction: row; padding-top: 0; } }
 
@@ -212,61 +237,50 @@ tr.out td { color: var(--muted); text-decoration: line-through; }
   }
 
   function stepHTML(s, sc, names) {
-    const t = `<span class="label num">${time(s.at)}</span>`;
-    const wrap = (chip, cls, body) => `<li class="step"><div class="when">${t}${chip}</div><div class="card ${cls}">${body}</div></li>`;
+    const at = `<span class="time">${time(s.at)}</span>`;
+    const note = (body, cls = '') => `<li class="step cnote ${cls}"><div class="cn">${body}</div></li>`;
+    const initial = (name) => esc(String(name ?? '?').replace(/^(โรงสี|ผู้ส่งออก|ตลาดค้าส่ง)(จำลอง)?\s*/, '').slice(0, 2) || '?');
+    const ded = (list) => (list ?? []).map((d) => typeof d === 'string' ? d : d.kind === 'percent' ? `${d.label} ${d.percent}%` : d.kind === 'per_kg' ? `${d.label} ${d.amountPerKg} บาท/กก.` : `${d.label} ${d.amount} บาท`);
     switch (s.kind) {
-      case 'plan':
-        return wrap('<span class="chip agent">วางแผน</span>', 'agent', `<p class="pre">${esc(s.text)}</p>`);
-      case 'reasoning':
-        return wrap('<span class="chip agent">ประเมินใหม่</span>', 'agent', `<p class="pre">${esc(s.text)}</p>`);
       case 'market':
-        if (!s.available) return wrap('<span class="chip">ราคาตลาด</span>', 'quiet', `<p class="muted">${esc(s.note)}</p>`);
-        return wrap('<span class="chip">ราคาตลาดจริง</span>', '', `
-          <div class="row"><span class="big">${baht(s.medianPerKg)}</span><span>บาท/กก. ค่ากลาง</span><span class="muted small">ช่วง ${baht(s.minPerKg)}–${baht(s.maxPerKg)} จาก ${s.sampleCount} แหล่ง</span></div>
-          ${s.sameProvince?.length ? `<div class="quotes">${s.sameProvince.map((q) => `<span>${esc(q.market)} <b class="num">${baht(q.pricePerKg)}</b></span>`).join('')}</div>` : ''}
-          <p class="muted small" style="margin-top:6px">${esc(s.source)} · ${esc(s.date)}${s.stale ? ' · ข้อมูลของวันก่อนหน้า' : ''}</p>`);
+        return s.available
+          ? note(`น้องมะระดูราคาตลาด NABC (${esc(s.date)}${s.stale ? ' · ข้อมูลล่าสุดที่มี' : ''}): ราคากลาง <b class="num">${baht(s.medianPerKg)}</b> บาท/กก. ช่วง ${baht(s.minPerKg)}–${baht(s.maxPerKg)}`)
+          : note(esc(s.note));
       case 'rag':
-        return wrap('<span class="chip">ค้นความรู้ (RAG)</span>', '', `
-          <p class="small"><span class="muted">ค้นหา:</span> ${esc(s.query)}</p>
-          <ul class="hits">${s.hits.map((h) => `<li><div class="src">${esc(h.source)}</div><div class="txt">${esc(h.text)}</div><button type="button" data-more>อ่านต่อ</button></li>`).join('')}</ul>`);
+        return note(`<details><summary>ค้นข้อมูลอ้างอิง: ${esc(s.query)}</summary><ul class="chits">${s.hits.map((h) => `<li><b>${esc(h.source)}</b> — ${esc(h.text).slice(0, 220)}…</li>`).join('')}</ul></details>`);
       case 'buyers':
-        return wrap('<span class="chip">หาผู้ซื้อ</span>', 'quiet', `<p class="small">ผู้ซื้อที่รับพืช เกรด และปริมาณนี้: ${s.buyers.map((b) => `<b>${esc(b.name)}</b> <span class="muted">(รับ ${kg(b.minKg)}+ กก. · จ่ายใน ${b.paymentTermDays} วัน)</span>`).join(' · ') || 'ไม่มี'}</p>`);
-      case 'buyer': {
-        const [lbl, cls] = DECISION[s.decision] ?? [s.decision, 'info'];
-        const ded = (s.deductions ?? []).map((d) => d.kind === 'percent' ? `${d.label} ${d.percent}%` : d.kind === 'per_kg' ? `${d.label} ${d.amountPerKg} บาท/กก.` : `${d.label} ${d.amount} บาท`);
-        return wrap('<span class="chip buyer">ผู้ซื้อตอบ</span>', 'buyer', `
-          <div class="row"><span class="who">${esc(s.buyer)}</span><span class="pill ${cls}">${lbl}</span><span class="big">${baht(s.price)}</span><span class="small">บาท/กก.</span>${ded.length ? `<span class="pill mid">${esc(ded.join(', '))}</span>` : ''}</div>
-          <div class="msg">${esc(s.message)}</div>
-          ${s.acknowledged?.length ? `<div class="ack"><span class="small muted">หลักฐานที่ได้ผล:</span>${s.acknowledged.map((t) => `<span class="pill ok">${esc(TAG[t] ?? t)}</span>`).join('')}</div>` : ''}
-          ${s.objection ? `<div class="objection"><b>ข้อโต้แย้ง:</b> ${esc(s.objection.text)}</div>` : ''}`);
-      }
+        return note(`หาผู้ซื้อที่รับปริมาณนี้ได้ ${s.buyers.length} ราย: ${s.buyers.map((b) => esc(b.name)).join(', ') || '–'}`);
       case 'history':
-        return wrap('<span class="chip">ประวัติการเจรจา</span>', 'quiet', `<p class="small"><b>${esc(names[s.buyerId] ?? s.buyerId)}</b> ที่ระบบบันทึกไว้: ${s.records.slice(0, 3).map((r) => `${esc(String(r.at).slice(0, 10))} เปิด <span class="num">${baht(r.openingPerKg)}</span> → สุดท้าย <b class="num">${baht(r.finalPerKg)}</b>`).join(' · ')}</p>`);
+        return note(`ประวัติที่เคยคุยกับ ${esc(names[s.buyerId] ?? s.buyerId)}: ${s.records.slice(0, 2).map((r) => `เปิด ${baht(r.openingPerKg)} → จบ ${baht(r.finalPerKg)}`).join(' · ')}`);
+      case 'buyer': {
+        const [lbl] = DECISION[s.decision] ?? [s.decision];
+        const d = ded(s.deductions);
+        const msg = s.objection && !String(s.message).includes(s.objection.text) ? `${s.message} ${s.objection.text}` : s.message;
+        return `<li class="step cmsg"><div class="avatar" aria-hidden="true">${initial(s.buyer)}</div><div class="bubble">
+          <div class="who"><b>${esc(s.buyer)}</b>${at}</div>
+          <div class="text">${esc(msg)}</div>
+          <div class="meta"><span class="tag">${baht(s.price)} บาท/กก.</span><span>${esc(lbl)}</span>${d.length ? `<span>· ${esc(d.join(', '))}</span>` : ''}${s.acknowledged?.length ? `<span>· เห็นด้วยเรื่อง${esc(s.acknowledged.map((t) => TAG[t] ?? t).join(', '))}</span>` : ''}</div>
+        </div></li>`;
+      }
       case 'counter':
-        return wrap('<span class="chip agent">น้องมะระเสนอ</span>', 'agent', `
-          <div class="row">${s.round ? `<span class="small muted">รอบ ${s.round} ·</span>` : ''}<span class="small muted">ถึง</span><span class="who">${esc(names[s.buyerId] ?? s.buyerId)}</span><span class="big">${baht(s.price)}</span><span class="small">บาท/กก.</span>${s.strategy ? `<span class="pill ok">${esc(STRATEGY[s.strategy] ?? s.strategy)}</span>` : ''}${s.contest?.length ? `<span class="pill mid">ขอลด${esc(s.contest.join(', '))}</span>` : ''}</div>
-          ${s.rationale ? `<p class="why">เหตุผล: ${esc(s.rationale)}</p>` : ''}
-          ${s.evidence?.length ? `<div class="evid" aria-label="หลักฐานที่อ้าง">${s.evidence.map((e) => `<span class="${e.verified ? '' : 'sim'}" title="${esc(e.id)}"><b>${e.verified ? '✓' : 'จำลอง'}</b>${esc(e.label)}</span>`).join('')}</div>` : (s.strategy ? '<p class="why">ไม่ได้อ้างหลักฐาน</p>' : '')}
-          <div class="msg">${esc(s.message)}</div>`);
+        return `<li class="step cmsg me"><div class="avatar" aria-hidden="true">มะ</div><div class="bubble">
+          <div class="who"><b>น้องมะระ</b> ถึง ${esc(names[s.buyerId] ?? s.buyerId)} ${at}</div>
+          <div class="text">${esc(s.message)}</div>
+          <div class="meta"><span class="tag">ขอ ${baht(s.price)} บาท/กก.</span>${s.contest?.length ? `<span>· ขอลด${esc(s.contest.join(', '))}</span>` : ''}</div>
+          ${s.strategy ? `<details><summary>ทำไมพูดแบบนี้</summary><p style="margin-top:4px">${esc(STRATEGY[s.strategy] ?? s.strategy)}${s.rationale ? ` — ${esc(s.rationale)}` : ''}</p>${s.evidence?.length ? `<ul>${s.evidence.map((e) => `<li>${e.verified ? '' : '(ข้อมูลจำลอง) '}${esc(e.label)}</li>`).join('')}</ul>` : ''}</details>` : ''}
+        </div></li>`;
       case 'evaluation':
-        return `<li class="step"><div class="when">${t}<span class="chip">โค้ดคำนวณ</span></div><div class="card quiet small"><div class="row">
-          <span>ราคาสุทธิ <b>${esc(s.buyer ?? s.buyerId)}</b> ที่ ${baht(s.price)}${s.deductions?.length ? ` (${esc(s.deductions.join(', '))})` : ''}</span>
-          <span>เฉลี่ย <b class="num">${baht(s.netAvg)}</b> บาท/กก.</span>
-          ${s.passes ? '<span class="pill ok">ผ่านขั้นต่ำทุกคน</span>' : `<span class="pill bad">ต่ำกว่าขั้นต่ำ ${s.below} คน</span>`}
-        </div></div></li>`;
+        return note(`คิดราคาสุทธิให้แล้ว: ${esc(s.buyer ?? s.buyerId)} ${baht(s.price)} → เกษตรกรได้เฉลี่ย <b class="num">${baht(s.netAvg)}</b> บาท/กก. · ${s.passes ? 'ผ่านขั้นต่ำทุกคน' : `ยังต่ำกว่าขั้นต่ำ ${s.below} คน`}`);
       case 'blocked':
-        return wrap('<span class="chip danger">ระบบป้องกัน</span>', 'danger', `
-          <div class="row"><b>บล็อก: ${esc(BLOCK[s.code] ?? s.code)}</b>${s.attemptedPrice ? `<span class="small">ราคาที่พยายามเสนอ <span class="num">${baht(s.attemptedPrice)}</span></span>` : ''}</div>
-          <p class="small" style="margin-top:4px">${esc(s.reason)}</p>
-          <p class="small muted" style="margin-top:4px">ไม่มีอะไรถูกส่งถึงผู้ซื้อ · บันทึกลง ledger แล้ว</p>`);
+        return note(`<details><summary>ระบบป้องกันไม่ส่งข้อความนี้ถึงผู้ซื้อ: ${esc(BLOCK[s.code] ?? s.code)}</summary> — ${esc(s.reason)}</details>`, 'bad');
       case 'tool_error':
-        return wrap('<span class="chip">ข้อผิดพลาด</span>', 'quiet', `<p class="small muted">${esc(s.tool)}: ${esc(s.error)}</p>`);
+        return note(esc(s.error));
       case 'llm_error':
-        return wrap('<span class="chip danger">AI ขัดข้อง</span>', 'danger', `<p class="small">${esc(s.error)}</p>`);
+        return note(`AI ขัดข้อง: ${esc(s.error)}`, 'bad');
       case 'outcome':
         return s.outcomeKind === 'prepared'
-          ? wrap('<span class="chip agent">ผลลัพธ์</span>', 'agent', `<p><b>เตรียมดีลกับ ${esc(s.buyerName)} ให้เกษตรกรอนุมัติ</b></p><p class="small muted">Agent ปิดดีลเองไม่ได้ ต้องรอเกษตรกรกดอนุมัติ</p>`)
-          : wrap('<span class="chip warn">ผลลัพธ์</span>', 'warn', `<p><b>${s.outcomeKind === 'escalated' ? 'ส่งเรื่องให้กลุ่มตัดสินใจ' : 'หยุดอย่างปลอดภัย'}</b></p><p class="small">${esc(s.reason)}</p>`);
+          ? note(`น้องมะระเลือก ${esc(s.buyerName)} แล้วส่งให้เกษตรกรตัดสินใจ — ยังไม่ปิดดีลจนกว่าทุกคนกดอนุมัติ`, 'ok')
+          : note(`${s.outcomeKind === 'escalated' ? 'ส่งเรื่องให้กลุ่มตัดสินใจ' : 'หยุดอย่างปลอดภัย'}: ${esc(s.reason)}`, 'warn');
       default:
         return '';
     }

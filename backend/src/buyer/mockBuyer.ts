@@ -310,7 +310,7 @@ export class MockBuyerApi {
       persuaded: 0,
     };
     this.sessions.set(id, s);
-    return this.respond(s, 'offer', `${buyer.name} ยินดีรับซื้อที่ ${s.currentPerKg.toFixed(2)} บาท/กก.${this.deductionNote(s)} ชำระภายใน ${buyer.paymentTermDays} วัน`);
+    return this.respond(s, 'offer', `สวัสดีครับ ทาง${buyer.name} ยินดีรับซื้อที่ ${s.currentPerKg.toFixed(2)} บาท/กก.${this.deductionNote(s)} จ่ายเงินภายใน ${buyer.paymentTermDays} วันครับ`);
   }
 
   submitCounter(sessionId: string, counter: CounterRequest): BuyerResponse {
@@ -331,20 +331,20 @@ export class MockBuyerApi {
       s.deductions = s.deductions.map((d) =>
         d.kind === 'percent' && d.label === MOISTURE ? { ...d, percent: buyer.moistureFloorPercent ?? d.percent } : d,
       );
-      deductionNote = ` ยอมลด${MOISTURE}เหลือ ${buyer.moistureFloorPercent}%`;
+      deductionNote = ` เรื่องความชื้น ยอมลดหักเหลือ ${buyer.moistureFloorPercent}% ให้ แต่ราคาขอคงไว้ก่อนนะครับ`;
     }
 
     // 1) ขอต่ำกว่าหรือเท่ากับที่ผู้ซื้อเสนออยู่ → รับทันที
     if (ask <= s.currentPerKg) {
       s.currentPerKg = ask;
       s.closed = true;
-      return this.respond(s, 'accept', `ตกลงที่ ${ask.toFixed(2)} บาท/กก.${deductionNote}${this.deductionNote(s)}`);
+      return this.respond(s, 'accept', `ได้ครับ ตกลง ${ask.toFixed(2)} บาท/กก.${deductionNote}${this.deductionNote(s)}`);
     }
 
     // 2) เกินจำนวนรอบ → ถอนตัว
     if (s.round > buyer.maxRounds) {
       s.closed = true;
-      return this.respond(s, 'walk_away', `${buyer.name} ขอยุติการเจรจา ข้อเสนอสุดท้ายคือ ${s.currentPerKg.toFixed(2)} บาท/กก.`);
+      return this.respond(s, 'walk_away', `คุยกันมาหลายรอบแล้ว ขอจบตรงนี้ก่อนนะครับ ราคาสุดท้ายที่เราให้ได้คือ ${s.currentPerKg.toFixed(2)} บาท/กก.`);
     }
 
     // 3) ชั่งน้ำหนักเหตุผลรอบนี้ (ก่อนนับว่าใช้แล้ว)
@@ -352,7 +352,7 @@ export class MockBuyerApi {
     const { power, acknowledged, weak, repeated } = this.weigh(s, counter.arguments ?? []);
     s.persuaded = Math.min(1, s.persuaded + power * 0.6);
     const budget = r2(book.reservationPerKg + buyer.flexPerKg * s.persuaded);
-    const ackNote = acknowledged.length ? ` ข้อมูล${acknowledged.map((t) => TAG_LABEL[t]).join(' และ')}ที่ให้มามีน้ำหนัก` : '';
+    const ackNote = acknowledged.length ? ` เรื่อง${acknowledged.map((t) => TAG_LABEL[t]).join('กับ')}ที่ยกมาฟังขึ้นครับ` : '';
 
     // 4) ขอสูงเกินงบมาก → ไม่ขยับ (anchoring ที่เกินจริงทำให้เสียความน่าเชื่อถือ)
     if (ask > budget * 1.15) {
@@ -360,7 +360,7 @@ export class MockBuyerApi {
       return this.respond(
         s,
         final ? 'final_offer' : 'counter',
-        `${buyer.name} ยังยืนที่ ${prev.toFixed(2)} บาท/กก. ราคาที่ขอห่างจากที่ตลาดรับได้มากเกินไป${deductionNote}${this.deductionNote(s)}`,
+        `ราคานั้นห่างจากที่ตลาดรับได้เยอะเกินไปครับ ขอยืนที่ ${prev.toFixed(2)} บาท/กก. ไว้ก่อน${deductionNote}${this.deductionNote(s)}`,
         { code: 'unrealistic_ask', text: 'ราคาที่ขอสูงเกินจริงมาก ขอตัวเลขที่สมเหตุสมผลกว่านี้' },
         acknowledged,
       );
@@ -377,15 +377,15 @@ export class MockBuyerApi {
     if (ask <= budget && r2(ask - next) <= 0.05) {
       s.currentPerKg = ask;
       s.closed = true;
-      return this.respond(s, 'accept', `ตกลงที่ ${ask.toFixed(2)} บาท/กก.${ackNote}${deductionNote}${this.deductionNote(s)}`, undefined, acknowledged);
+      return this.respond(s, 'accept', `โอเคครับ ตกลง ${ask.toFixed(2)} บาท/กก.${ackNote}${deductionNote}${this.deductionNote(s)}`, undefined, acknowledged);
     }
 
     s.currentPerKg = next;
     const objection = this.objection(s, ask, budget, weak, repeated);
     if (next >= budget || s.round === buyer.maxRounds) {
-      return this.respond(s, 'final_offer', `ราคาสุดท้ายของ${buyer.name}คือ ${next.toFixed(2)} บาท/กก.${ackNote}${deductionNote}${this.deductionNote(s)}`, objection, acknowledged);
+      return this.respond(s, 'final_offer', `${ackNote.trim() ? `${ackNote.trim()} ` : ''}ให้ได้สุดที่ ${next.toFixed(2)} บาท/กก. แล้วครับ เกินนี้ไม่ไหวจริง ๆ${deductionNote}${this.deductionNote(s)}`, objection, acknowledged);
     }
-    return this.respond(s, 'counter', `${buyer.name} ขยับให้เป็น ${next.toFixed(2)} บาท/กก.${ackNote}${deductionNote}${this.deductionNote(s)}`, objection, acknowledged);
+    return this.respond(s, 'counter', `${ackNote.trim() ? `${ackNote.trim()} ` : ''}ขยับให้เป็น ${next.toFixed(2)} บาท/กก. ได้ครับ${deductionNote}${this.deductionNote(s)} ${objection.text}ครับ`, objection, acknowledged);
   }
 
   /** น้ำหนักของเหตุผลรอบนี้ (0–1): ตรงข้อกังวล × ยังไม่ซ้ำ × ถูกต้อง (ราคาอ้างอิงต้องสูงกว่าที่ให้อยู่จริง) */
@@ -436,7 +436,7 @@ export class MockBuyerApi {
     const parts = s.deductions.map((d) =>
       d.kind === 'percent' ? `${d.label} ${d.percent}%` : d.kind === 'per_kg' ? `${d.label} ${d.amountPerKg} บาท/กก.` : `${d.label} ${d.amount} บาท`,
     );
-    return ` (เงื่อนไขมาตรฐาน: ${parts.join(', ')})`;
+    return ` (ตามเงื่อนไขปกติของเรา: ${parts.join(', ')})`;
   }
 
   private respond(s: Session, decision: BuyerDecision, message: string, objection?: Objection, acknowledged?: ArgumentTag[]): BuyerResponse {
