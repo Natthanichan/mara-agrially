@@ -9,7 +9,7 @@ import { DECISION_TH, type RoundSummary } from './rounds.js';
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm'] as const;
 export type Act = (typeof ACTS)[number];
 const CROPS: Crop[] = ['rice_hommali', 'bitter_gourd', 'cassava'];
 export const postbackData = (act: Act, dealId?: string, crop?: Crop) => new URLSearchParams({ act, ...(dealId ? { d: dealId } : {}), ...(crop ? { c: crop } : {}) }).toString();
@@ -180,7 +180,27 @@ export const buyerCropMessage = (): LineMessage =>
 
 export const buyerAskQuantity = (crop: Crop) => text(`ต้องการ${CROP_LABEL_TH[crop]}เท่าไหร่คะ ตอบเป็นตันหรือกิโลกรัมได้เลย เช่น “10 ตัน” หรือ “10000 กก.”`);
 export const buyerAskLocation = () => text('ส่งมอบที่ไหนคะ ตอบสถานที่ได้เลย เช่น “โรงสี ต.บางพลี จ.สมุทรปราการ”');
-export const buyerAskPrice = () => text('ราคาที่เสนอซื้อกี่บาทต่อกก. คะ เช่น “18.5”');
+/** ราคาอ้างอิงตลาดสำหรับช่วยผู้ซื้อตั้งราคา (จาก NABC) */
+export interface PriceHint {
+  medianPerKg: number;
+  minPerKg: number;
+  maxPerKg: number;
+  date: string;
+  stale: boolean;
+}
+
+export function buyerAskPrice(cropLabel?: string, hint?: PriceHint | null): LineMessage {
+  const lines = ['ราคาที่เสนอซื้อกี่บาทต่อกก. คะ เช่น “18.5”'];
+  if (hint) {
+    lines.push('', `ราคาแนะนำ: ราคากลางตลาด${cropLabel ? `ของ${cropLabel}` : ''} ${baht(hint.medianPerKg)} บาท/กก. (ช่วง ${baht(hint.minPerKg)}–${baht(hint.maxPerKg)})`, `ที่มา: ศูนย์ข้อมูลเกษตร NABC วันที่ ${hint.date}${hint.stale ? ' (ข้อมูลล่าสุดที่มี)' : ''} · เป็นราคาหน้าตลาด ยังไม่รวมค่าขนส่ง`);
+  } else if (hint === null) {
+    lines.push('', `ยังไม่มีราคาอ้างอิงจาก NABC สำหรับ${cropLabel ?? 'พืชนี้'}ค่ะ เสนอราคาที่คุณคิดว่าเหมาะสมได้เลย`);
+  }
+  const m = text(lines.join('\n'));
+  if (!hint) return m;
+  const opts = [...new Set([hint.minPerKg, hint.medianPerKg, hint.maxPerKg].map((n) => baht(n)))];
+  return { ...m, quickReply: { items: opts.map((v, i) => ({ type: 'action', action: { type: 'message', label: `${v}${opts.length === 3 && i === 1 ? ' (ราคากลาง)' : ''}`.slice(0, 20), text: v } })) } };
+}
 
 export function buyerConfirmMessage(d: Required<Omit<BuyerDraft, 'step'>>): LineMessage {
   return bubble(
@@ -345,3 +365,31 @@ export function negotiationAgreed(g: GroupForBuyer, agreedPerKg: number, members
     `ตกลง ${g.cropLabel} ที่ ${baht(agreedPerKg)} บาท/กก. เกษตรกรในกลุ่มอนุมัติแล้ว (จำลอง)`,
   );
 }
+
+/** ระบบตีความว่าผู้ซื้อเสนอถึงราคาที่กลุ่มรับได้ → ขอให้ยืนยันราคานั้นก่อนตกลง */
+export function negotiationConfirmDeal(g: GroupForBuyer, pricePerKg: number): LineMessage {
+  return bubble(
+    'ยืนยันราคาก่อนตกลงนะคะ',
+    [row('ผลผลิต', `${g.cropLabel} · จ.${g.province}`), row('ราคาที่จะตกลง', `${baht(pricePerKg)} บาท/กก.`, true), { type: 'text', text: 'กดยืนยันถ้าตรงกับที่คุณตั้งใจ ถ้าไม่ใช่ กด “ยังไม่ตกลง” แล้วเจรจาต่อได้ค่ะ', size: 'xs', color: '#666666', wrap: true }],
+    [button(`ยืนยันตกลงที่ ${baht(pricePerKg)}`.slice(0, 20), postbackData('buyer_deal_confirm'), `ยืนยันตกลงที่ ${baht(pricePerKg)} บาท/กก.`, 'primary', '#3A4C9C'), button('ยังไม่ตกลง เจรจาต่อ', postbackData('buyer_deal_back'), 'ยังไม่ตกลง ขอเจรจาต่อ', 'secondary')],
+    `ยืนยันตกลงที่ ${baht(pricePerKg)} บาท/กก. ไหมคะ`,
+  );
+}
+
+/** ก่อนจบการเจรจา: สรุปราคาล่าสุดของทั้งสองฝั่ง และถามให้แน่ใจ */
+export function negotiationConfirmEnd(lastOffer: number | undefined, askPerKg: number): LineMessage {
+  return bubble(
+    'จบการเจรจาโดยยังไม่ตกลงราคา ใช่ไหมคะ',
+    [...(lastOffer !== undefined ? [row('คุณเสนอล่าสุด', `${baht(lastOffer)} บาท/กก.`)] : []), row('หนูเสนอล่าสุด', `${baht(askPerKg)} บาท/กก.`, true), { type: 'text', text: 'ถ้าจบตอนนี้ จะไม่มีดีลเกิดขึ้น และไม่มีราคาใดผูกพันทั้งสองฝ่ายค่ะ', size: 'xs', color: '#666666', wrap: true }],
+    [
+      button('จบ ไม่ตกลง', postbackData('buyer_end_confirm'), 'จบการเจรจา ไม่ตกลง', 'secondary'),
+      button(`ตกลงที่ ${baht(askPerKg)}`.slice(0, 20), postbackData('buyer_accept'), `ตกลงที่ ${baht(askPerKg)} บาท/กก.`, 'primary', '#3A4C9C'),
+      button('เจรจาต่อ', postbackData('buyer_deal_back'), 'เจรจาต่อ', 'secondary'),
+    ],
+    `จบการเจรจาโดยไม่ตกลงใช่ไหม · หนูเสนอล่าสุด ${baht(askPerKg)} บาท/กก.`,
+  );
+}
+
+/** บรรทัดสถานะที่โค้ดเขียนเอง — ให้เห็นชัดว่าแต่ละฝั่งเสนอเท่าไร */
+export const negotiationStatusLine = (offer: number | undefined, askPerKg: number, round: number) =>
+  `รอบ ${round} · ${offer !== undefined ? `คุณเสนอ ${baht(offer)} · ` : ''}หนูเสนอ ${baht(askPerKg)} บาท/กก.`;

@@ -23,7 +23,10 @@ export interface BuyerNegState {
   minPassPerKg: number;
   rounds: number;
   lastOfferPerKg?: number;
-  status: 'open' | 'agreed' | 'ended';
+  /** confirming = ระบบตีความว่าผู้ซื้อเสนอถึงราคาที่รับได้ รอผู้ซื้อกดยืนยันราคานั้นก่อน · confirming_end = รอยืนยันว่าจะจบโดยไม่ตกลง */
+  status: 'open' | 'confirming' | 'confirming_end' | 'agreed' | 'ended';
+  /** ราคาที่รอผู้ซื้อยืนยัน */
+  pendingPerKg?: number;
   agreedPerKg?: number;
   startedAt: string;
   /** ราคากลาง NABC ตอนเริ่มเจรจา (ถ้ามี) — หลักฐานที่อ้างได้ */
@@ -72,7 +75,8 @@ export function decide(st: BuyerNegState, offer: number | undefined): BuyerNegDe
 export function apply(st: BuyerNegState, offer: number | undefined, d: BuyerNegDecision): BuyerNegState {
   if (d.kind === 'question') return st;
   const next: BuyerNegState = { ...st, rounds: st.rounds + 1, ...(offer !== undefined ? { lastOfferPerKg: r2(offer) } : {}) };
-  if (d.kind === 'accept') return { ...next, status: 'agreed', agreedPerKg: d.agreedPerKg };
+  // ยังไม่ตกลงจนกว่าผู้ซื้อกดยืนยันราคานี้เอง (ระบบอาจตีความข้อความผิดได้)
+  if (d.kind === 'accept') return { ...next, status: 'confirming', pendingPerKg: d.agreedPerKg };
   if (d.kind === 'final') return { ...next, askPerKg: d.askPerKg };
   return { ...next, askPerKg: d.askPerKg };
 }

@@ -884,37 +884,112 @@ describe('ผู้ซื้อเจรจาราคากับน้อง�
     expect(JSON.stringify(events)).not.toContain('minPass');
   });
 
-  it('เสนอสูงกว่าที่น้องมะระขอ → ตกลงที่ราคาผู้ซื้อทันที (ไม่ลดให้เอง) · พิมพ์ "สนใจ" ก็เริ่มเจรจาได้ · "จบ" ปิดการเจรจา', async () => {
+  it('เสนอสูงกว่าที่น้องมะระขอ → ขอให้ยืนยันราคาของผู้ซื้อก่อน (ไม่ลดให้เอง) → กดยืนยัน → ตกลง', async () => {
     const h = setup();
     await register(h, '25');
     await h.say('สนใจ');
-    const st = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+    let st = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+    expect(st).toMatchObject({ status: 'confirming', pendingPerKg: 25 });
+    expect(buttons(h.last().messages.at(-1)!).map((b) => b.label)).toEqual(['ยืนยันตกลงที่ 25.00', 'ยังไม่ตกลง เจรจาต่อ']);
+    expect(h.last().messages.map(asText).join(' ')).not.toContain('ตกลงราคาเบื้องต้นแล้ว');
+    await h.tap(postbackData('buyer_deal_confirm'));
+    st = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
     expect(st).toMatchObject({ status: 'agreed', agreedPerKg: 25 });
+    expect(h.last().messages.map(asText).join(' ')).toContain('ตกลงราคาเบื้องต้นแล้ว');
+  });
 
+  it('ยืนยันด้วยการพิมพ์ "ใช่" ได้ · กด "ยังไม่ตกลง" กลับไปเจรจาต่อ', async () => {
+    const a = setup();
+    await register(a, '25');
+    await a.say('สนใจ');
+    await a.say('ใช่');
+    expect((await a.store.getLineSession('U-farmer'))!.buyerNeg!.status).toBe('agreed');
+
+    const b = setup();
+    await register(b, '25');
+    await b.say('สนใจ');
+    await b.tap(postbackData('buyer_deal_back'));
+    const st = (await b.store.getLineSession('U-farmer'))!.buyerNeg!;
+    expect(st.status).toBe('open');
+    expect(st.pendingPerKg).toBeUndefined();
+  });
+
+  it('"จบ" → ถามยืนยันพร้อมราคาล่าสุดทั้งสองฝั่ง → จบไม่ตกลง หรือเลือกตกลงที่ราคาที่หนูเสนอ', async () => {
     const e = setup();
     await register(e, '16');
     await e.say('สนใจค่ะ');
-    expect((await e.store.getLineSession('U-farmer'))!.buyerNeg!.status).toBe('open');
+    const ask = (await e.store.getLineSession('U-farmer'))!.buyerNeg!.askPerKg;
     await e.say('จบ');
+    expect((await e.store.getLineSession('U-farmer'))!.buyerNeg!.status).toBe('confirming_end');
+    const card = e.last().messages[0]!;
+    expect(asText(card)).toContain('คุณเสนอล่าสุด');
+    expect(asText(card)).toContain('16.00');
+    expect(asText(card)).toContain(ask.toFixed(2));
+    expect(buttons(card).map((b) => b.label)).toEqual(['จบ ไม่ตกลง', `ตกลงที่ ${ask.toFixed(2)}`, 'เจรจาต่อ']);
+    await e.tap(postbackData('buyer_end_confirm'));
     expect((await e.store.getLineSession('U-farmer'))!.buyerNeg!.status).toBe('ended');
-    expect(asText(e.last().messages[0]!)).toContain('จบการเจรจา');
+
+    const f = setup();
+    await register(f, '16');
+    await f.say('สนใจ');
+    await f.say('จบ');
+    await f.tap(postbackData('buyer_accept'));
+    expect((await f.store.getLineSession('U-farmer'))!.buyerNeg!).toMatchObject({ status: 'agreed' });
   });
 
-  it('มี AI: น้องมะระเขียนข้อความโน้มน้าวตามการตัดสินของโค้ด บริบทไม่มีราคาภายใน และราคาที่ตัดสินต้องอยู่ในข้อความเสมอ', async () => {
+  it('ทุกรอบมีบรรทัดสถานะจากโค้ด: คุณเสนอเท่าไร หนูเสนอเท่าไร', async () => {
     const h = setup();
-    const seen: string[] = [];
-    h.ctx.chatLlm = () => ({ name: 's', converse: async (req: any) => (seen.push(req.system), { content: [{ text: 'ราคากลางตลาด NABC 17.65 บาท/กก. และกลุ่มส่งเป็นล็อตเดียวค่ะ' }] }) }) as never;
-    h.ctx.chatDailyLimit = 50;
     await register(h, '16');
-    await h.tap(postbackData('buyer_negotiate', undefined, 'rice_hommali'));
+    await h.say('สนใจ');
     const st = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
-    const sys = seen.at(-1)!;
-    expect(sys).toContain('"decision"');
-    expect(sys).toContain(`"askPerKg":${st.askPerKg}`);
-    expect(sys).not.toContain(String(st.minPassPerKg));
-    expect(sys).not.toContain('minPass');
-    const msg = asText(h.last().messages[1]!);
-    expect(msg).toContain('17.65');
-    expect(msg).toContain(st.askPerKg.toFixed(2)); // AI ไม่ได้พูดราคา → ระบบเติมให้
+    expect(asText(h.last().messages[1]!)).toContain(`รอบ 1 · คุณเสนอ 16.00 · หนูเสนอ ${st.askPerKg.toFixed(2)} บาท/กก.`);
+  });
+
+  it('มี AI: ข้อความของน้องมะระต้องตรงกับการตัดสินของโค้ด (ตัด markdown) · ถ้าพูดไม่ตรงหรือฟังเหมือนรับราคา → ใช้ข้อความสำเร็จรูป · บริบทไม่มีราคาภายใน', async () => {
+    const run = async (reply: (sys: string) => string) => {
+      const h = setup();
+      const seen: string[] = [];
+      h.ctx.chatLlm = () => ({ name: 's', converse: async (req: any) => (seen.push(req.system), { content: [{ text: reply(req.system) }] }) }) as never;
+      h.ctx.chatDailyLimit = 50;
+      await register(h, '16');
+      await h.tap(postbackData('buyer_negotiate', undefined, 'rice_hommali'));
+      const st = (await h.store.getLineSession('U-farmer'))!.buyerNeg!;
+      return { h, st, sys: seen.at(-1)!, msg: asText(h.last().messages[1]!) };
+    };
+    const askOf = (sys: string) => /"askPerKg":([\d.]+)/.exec(sys)![1]!;
+
+    const good = await run((sys) => `ราคา 16 บาทยังต่ำไปค่ะ ราคากลางตลาด **NABC** 17.65 บาท/กก. หนูขอเสนอ ${Number(askOf(sys)).toFixed(2)} บาท/กก. ค่ะ`);
+    expect(good.sys).toContain(`"askPerKg":${good.st.askPerKg}`);
+    expect(good.sys).not.toContain(String(good.st.minPassPerKg));
+    expect(good.sys).not.toContain('minPass');
+    expect(good.msg).toContain('17.65');
+    expect(good.msg).not.toContain('**');
+
+    const noPrice = await run(() => 'ราคากลางตลาด NABC 17.65 บาท/กก. ค่ะ');
+    expect(noPrice.msg).toContain(`หนูขอเสนอ ${noPrice.st.askPerKg.toFixed(2)}`); // ใช้ข้อความสำเร็จรูป
+
+    const contradicts = await run((sys) => `ขอบคุณที่เสนอ 16 บาทค่ะ หนูจะเสนอราคานี้ให้กลุ่มพิจารณา ${askOf(sys)}`);
+    expect(contradicts.msg).not.toContain('ให้กลุ่มพิจารณา');
+    expect(contradicts.msg).toContain('กลุ่มยังรับไม่ได้');
+  });
+
+  it('ตอนกรอกราคา: แสดงราคาแนะนำจาก NABC พร้อมปุ่มลัด · พืชที่ไม่มีใน NABC บอกตรง ๆ', async () => {
+    const h = setup();
+    await h.tap(postbackData('role_buyer'));
+    await h.tap(postbackData('buyer_crop', undefined, 'rice_hommali'));
+    await h.say('10 ตัน');
+    await h.say('โรงสี จ.ร้อยเอ็ด');
+    const m = h.last().messages[0]!;
+    expect(asText(m)).toContain('ราคาแนะนำ');
+    expect(asText(m)).toContain('17.65');
+    expect(asText(m)).toContain('NABC');
+    expect(quick(m).map((a) => a.label)).toContain('17.65 (ราคากลาง)');
+
+    const g = setup();
+    await g.tap(postbackData('role_buyer'));
+    await g.tap(postbackData('buyer_crop', undefined, 'bitter_gourd'));
+    await g.say('3 ตัน');
+    await g.say('ตลาดไท');
+    expect(asText(g.last().messages[0]!)).toContain('ยังไม่มีราคาอ้างอิงจาก NABC');
   });
 });
