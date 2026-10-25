@@ -9,6 +9,8 @@ export const ROUTE_TRIP_COST: Record<string, number> = {
   'RE-2': 8_000,
   'RB-1': 2_500,
   'NR-1': 9_000,
+  'SR-1': 3_000,
+  'PB-1': 6_000,
 };
 export const DEFAULT_TRIP_COST = 8_000;
 

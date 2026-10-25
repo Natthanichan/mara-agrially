@@ -16,11 +16,11 @@ export interface AgentLimits {
 }
 
 export const DEFAULT_LIMITS: AgentLimits = {
-  maxSteps: 14,
+  maxSteps: 18,
   llmTimeoutMs: 20_000,
   llmRetries: 1,
   maxTokensPerCall: 1200,
-  maxTotalTokens: 80_000,
+  maxTotalTokens: 250_000, // 18 ขั้นส่งประวัติสนทนาซ้ำทุกขั้น 80k ไม่พอ (เจอจริงบน Nova)
 };
 
 export interface TraceEvent {
@@ -48,6 +48,15 @@ export interface AgentMetrics {
   /** ราคาสุทธิเฉลี่ยที่ได้เพิ่มจากข้อเสนอแรกที่ดีที่สุด */
   upliftVsBestOpeningPerKg?: number;
   upliftVsBestOpeningBaht?: number;
+  /** ราคาสุทธิเฉลี่ยที่ได้เพิ่มจากข้อเสนอแรกของผู้ซื้อรายที่เลือก */
+  upliftVsChosenOpeningPerKg?: number;
+  upliftVsChosenOpeningBaht?: number;
+  /** กลยุทธ์ที่ใช้และจำนวนครั้ง */
+  strategies?: Record<string, number>;
+  /** ใช้เหตุผลชุดเดิมซ้ำกับผู้ซื้อรายเดิม */
+  repeatedMoves?: number;
+  /** ข้อความที่ถูกบล็อกเพราะมีตัวเลขที่ไม่มีหลักฐาน */
+  unverifiedNumberBlocks?: number;
 }
 
 export type AgentOutcome = Terminal | { kind: 'failed'; reason: string };
@@ -72,6 +81,24 @@ const ACTOR: Record<string, LedgerActor> = {
   outcome: 'system',
   status_changed: 'system',
 };
+
+const MAX_NUDGES = 2;
+
+/** เตือนเมื่อโมเดลเขียนแผนเป็นข้อความแต่ไม่เรียก tool (เจอจริงบน Nova) พร้อมบอกทางเลือกที่เป็นรูปธรรมจากสถานะจริง */
+function nudgeText(st: NegotiationState, deps: AgentDeps): string {
+  const contacted = new Set([...st.sessions.values()].map((s) => s.buyerId));
+  const todo = deps.buyers
+    .listBuyers(st.input.group.crop, st.input.group.grade, st.totalKg)
+    .map((b) => b.id)
+    .filter((id) => !contacted.has(id));
+  return [
+    'คุณตอบเป็นข้อความโดยไม่ได้เรียก tool ทุกขั้นต้องจบด้วยการเรียก tool อย่างน้อย 1 ตัว เขียนแผนในข้อความอย่างเดียวไม่พอ ให้ลงมือทำเลย เลือกอย่างใดอย่างหนึ่ง:',
+    todo.length ? `- request_quote กับผู้ซื้อที่ยังไม่ได้ขอใบเสนอราคา: ${todo.join(', ')}` : '- (ขอใบเสนอราคาครบทุกรายแล้ว)',
+    '- submit_counter กับผู้ซื้อที่ยังมีโอกาสผ่านขั้นต่ำ',
+    '- prepare_deal_for_approval กับข้อเสนอที่ผ่านขั้นต่ำทุกคนแล้ว',
+    '- escalate_to_farmers ถ้าไม่มีข้อเสนอที่ผ่านและไม่เหลือทางเจรจา',
+  ].join('\n');
+}
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -118,7 +145,7 @@ export async function runNegotiation(
 
   const messages: Message[] = [{ role: 'user', content: [{ text: initialBrief(st) }] }];
   let outcome: AgentOutcome | undefined;
-  let nudged = false;
+  let nudges = 0; // ครั้งที่เตือนแล้วเมื่อโมเดลตอบเป็นข้อความล้วนโดยไม่เรียก tool
 
   const callLlm = async (): Promise<LlmResponse> => {
     let lastErr: unknown;
@@ -177,12 +204,12 @@ export async function runNegotiation(
 
     const uses = content.filter(isToolUse);
     if (!uses.length) {
-      if (nudged) {
+      if (nudges >= MAX_NUDGES) {
         outcome = { kind: 'failed', reason: 'AI ไม่ได้เลือกการกระทำต่อ' };
         break;
       }
-      nudged = true;
-      messages.push({ role: 'user', content: [{ text: 'กรุณาเรียก tool เพื่อทำขั้นต่อไป หรือ prepare_deal_for_approval / escalate_to_farmers ถ้าได้ข้อสรุปแล้ว' }] });
+      nudges += 1;
+      messages.push({ role: 'user', content: [{ text: nudgeText(st, deps) }] });
       continue;
     }
 
@@ -208,6 +235,16 @@ export async function runNegotiation(
     for (const u of uses.slice(results.length)) {
       results.push({ toolResult: { toolUseId: u.toolUse.toolUseId, content: [{ json: { skipped: 'งานจบแล้ว' } }], status: 'error' } });
     }
+    // บอกโมเดลว่าเหลืออีกกี่ขั้น และเมื่อใกล้หมดให้สรุปเลย (เจอจริงบน Nova: ค้นข้อมูลวนจนหมดขั้นโดยไม่ได้สรุป)
+    const left = limits.maxSteps - m.steps;
+    if (!st.terminal) {
+      results.push({
+        text:
+          left <= 3
+            ? `[ระบบ] เหลืออีก ${left} ขั้น ต้องสรุปตอนนี้: เรียก prepare_deal_for_approval กับข้อเสนอที่ผ่านขั้นต่ำทุกคนและดีที่สุดที่มี หรือ escalate_to_farmers ถ้าไม่มีข้อเสนอที่ผ่าน`
+            : `[ระบบ] ใช้ไป ${m.steps}/${limits.maxSteps} ขั้น เหลืออีก ${left} ขั้น`,
+      });
+    }
     messages.push({ role: 'user', content: results });
 
     if (st.terminal) outcome = st.terminal;
@@ -231,6 +268,8 @@ function buildMetrics(
   const openings: OfferEvaluation[] = sessions.map((s) => st.evaluate(s, { pricePerKg: s.history[0]!.pricePerKg, deductions: s.history[0]!.deductions }));
   const bestOpening = openings.filter((o) => o.passesAllFloors).sort((a, b) => b.netPerKgAvg - a.netPerKgAvg)[0] ?? openings.sort((a, b) => b.netPerKgAvg - a.netPerKgAvg)[0];
   const final = outcome.kind === 'prepared' ? outcome.evaluation : undefined;
+  const chosen = outcome.kind === 'prepared' ? st.sessions.get(outcome.sessionId) : undefined;
+  const chosenOpening = chosen ? st.evaluate(chosen, { pricePerKg: chosen.history[0]!.pricePerKg, deductions: chosen.history[0]!.deductions }) : undefined;
   return {
     label: 'ผลทดสอบจากข้อมูลจำลอง (ไม่ใช่ผลลัพธ์จริงในตลาด)',
     ...m,
@@ -245,5 +284,11 @@ function buildMetrics(
     ...(final && bestOpening
       ? { upliftVsBestOpeningPerKg: r2(final.netPerKgAvg - bestOpening.netPerKgAvg), upliftVsBestOpeningBaht: r2(final.totalNetBaht - bestOpening.totalNetBaht) }
       : {}),
+    ...(final && chosenOpening
+      ? { upliftVsChosenOpeningPerKg: r2(final.netPerKgAvg - chosenOpening.netPerKgAvg), upliftVsChosenOpeningBaht: r2(final.totalNetBaht - chosenOpening.totalNetBaht) }
+      : {}),
+    strategies: { ...st.strategyCounts } as Record<string, number>,
+    repeatedMoves: st.repeatedMoves,
+    unverifiedNumberBlocks: st.violations.filter((v) => v.code === 'unverified_number').length,
   };
 }

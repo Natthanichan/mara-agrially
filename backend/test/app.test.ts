@@ -50,6 +50,17 @@ describe('บริการดีล (ไม่ใช้ AWS)', () => {
     expect((await store.listEvents(id)).length).toBeGreaterThan(40);
   });
 
+  it('พืชใหม่ (ยางพารา ข้าวโพดเลี้ยงสัตว์) เจรจาจนรออนุมัติได้ และผ่านราคาขั้นต่ำของทุกคน', async () => {
+    for (const [crop, buyer] of [['rubber', 'B-E'], ['corn', 'B-F']] as const) {
+      const { ctx } = makeCtx();
+      const { id } = await startDeal(ctx, { crop });
+      const view = await getDeal(ctx, id);
+      expect(view.status).toBe('pending_approval');
+      expect(view.deal).toMatchObject({ buyerId: buyer });
+      expect(view.ledgerVerified).toBe(true);
+    }
+  });
+
   it('worker ถูกเรียกซ้ำ (Lambda retry) → ไม่เจรจาซ้ำ', async () => {
     const { ctx, store } = makeCtx();
     const { id } = await startDeal(ctx, { crop: 'cassava' });
@@ -136,5 +147,21 @@ describe('ไฟล์ที่สร้างอัตโนมัติ', () =
   it('knowledge ที่ฝังใน Lambda ตรงกับโฟลเดอร์ knowledge/ (ถ้าไม่ตรง ให้รัน npm run build:assets)', () => {
     const fromDisk = loadKnowledgeDir(fileURLToPath(new URL('../knowledge', import.meta.url)));
     expect(chunkFiles(KNOWLEDGE_FILES)).toEqual(fromDisk);
+  });
+});
+
+describe('ประวัติการเจรจาจริง', () => {
+  it('จบดีลแล้วบันทึกราคาเปิด/สุดท้ายของผู้ซื้อแต่ละราย และดีลถัดไปดึงมาเป็นหลักฐาน E-HIST', async () => {
+    const { ctx, store } = makeCtx();
+    const { id } = await startDeal(ctx, { crop: 'rice_hommali' });
+    const rows = await store.listBuyerOutcomes('B-C', 'rice_hommali', 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ dealId: id, openingPerKg: 18.4, chosen: true });
+    expect(rows[0]!.finalPerKg).toBeGreaterThan(18.4);
+
+    const { id: second } = await startDeal(ctx, { crop: 'rice_hommali' });
+    const events = await store.listEvents(second);
+    const histResults = events.filter((e) => e.type === 'agent.tool_result' && e.data.tool === 'get_negotiation_history');
+    expect(histResults.some((e) => JSON.stringify(e.data).includes('E-HIST-B-C'))).toBe(true);
   });
 });

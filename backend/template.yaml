@@ -20,6 +20,19 @@ Parameters:
     MinValue: 1
     MaxValue: 500
     Description: Max negotiations per day (caps Bedrock spend on a public URL)
+  LinePush:
+    Type: String
+    Default: 'off'
+    AllowedValues: ['on', 'off']
+    Description: on = push results/buyer alerts (counts toward the LINE OA monthly message quota) · off = users tap "ดูผลเจรจา" (reply messages are free)
+  LineChannelSecretParam:
+    Type: String
+    Default: /mara-agrially/line/channel-secret
+    Description: SSM Parameter Store name (SecureString) holding the LINE channel secret
+  LineChannelAccessTokenParam:
+    Type: String
+    Default: /mara-agrially/line/channel-access-token
+    Description: SSM Parameter Store name (SecureString) holding the LINE channel access token
 
 Globals:
   Function:
@@ -33,6 +46,10 @@ Globals:
         BEDROCK_MODEL_ID: !Ref BedrockModelId
         DAILY_NEGOTIATION_LIMIT: !Ref DailyNegotiationLimit
         AGENT_MAX_ROUNDS: '5'
+        CHAT_DAILY_LIMIT: '300'
+        LINE_PUSH: !Ref LinePush
+        LINE_SECRET_PARAM: !Ref LineChannelSecretParam
+        LINE_TOKEN_PARAM: !Ref LineChannelAccessTokenParam
         NABC_TIMEOUT_MS: '5000'
         NODE_OPTIONS: --enable-source-maps
 
@@ -50,6 +67,9 @@ Resources:
         - { AttributeName: sk, KeyType: RANGE }
       SSESpecification:
         SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
 
   HttpApi:
     Type: AWS::Serverless::HttpApi
@@ -77,7 +97,7 @@ Resources:
       FunctionName: !Sub ${AWS::StackName}-api
       CodeUri: .
       Handler: api.handler
-      Timeout: 15
+      Timeout: 25   # แชต LINE เรียก Nova (ตอบใหม่ได้ 1 ครั้ง) — HTTP API รอได้ไม่เกิน 30 วิ
       LoggingConfig:
         LogGroup: !Ref ApiLogs
       Environment:
@@ -86,6 +106,20 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref Table }
         - LambdaInvokePolicy: { FunctionName: !Ref WorkerFunction }
+        - Statement:
+            - Sid: ChatWithAmazonNovaOnly
+              Effect: Allow
+              Action: [bedrock:InvokeModel]
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/amazon.nova*
+                - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova*
+        - Statement:
+            - Sid: ReadLineSecrets
+              Effect: Allow
+              Action: [ssm:GetParameter, ssm:GetParameters]
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LineChannelSecretParam}
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LineChannelAccessTokenParam}
       Events:
         Root:
           Type: HttpApi
@@ -118,6 +152,13 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref Table }
         - Statement:
+            - Sid: ReadLineSecrets
+              Effect: Allow
+              Action: [ssm:GetParameter, ssm:GetParameters]
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LineChannelSecretParam}
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LineChannelAccessTokenParam}
+        - Statement:
             - Sid: InvokeAmazonNovaOnly
               Effect: Allow
               Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
@@ -136,7 +177,7 @@ Outputs:
     Description: เปิดหน้านี้ในเบราว์เซอร์
     Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/
   LineWebhookUrl:
-    Description: ใส่ใน LINE Developers Console (ขั้นถัดไป)
+    Description: ใส่ใน LINE Developers Console → Messaging API → Webhook URL
     Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/line/webhook
   TableName:
     Value: !Ref Table

@@ -91,8 +91,17 @@ describe('Agent + LLM จำลอง: เจรจาครบวงจร', ()
     expect(res.trace.some((t) => t.type === 'tool_call' && t.data.tool === 'search_knowledge')).toBe(true);
     expect(res.trace.some((t) => t.type === 'reasoning' && String(t.data.text).includes('หยุดเจรจากับรายนี้'))).toBe(true); // อ่านนิสัย A
 
-    expect(res.metrics).toMatchObject({ buyersContacted: 3, guardrailBlocks: 0, marketMedianPerKg: 17.65 });
+    expect(res.metrics).toMatchObject({ buyersContacted: 3, marketMedianPerKg: 17.65, unverifiedNumberBlocks: 0 });
+    // บล็อกที่เกิดได้มีแบบเดียว: ข้อเสนอจริงของรายอื่น (17.00) บังเอิญตรงกับราคาขั้นต่ำของสมาชิก → ไม่ส่งตัวเลขนั้น
+    const blocks = res.trace.filter((t) => t.type === 'guardrail_blocked');
+    expect(blocks.every((b) => b.data.code === 'private_data_leak')).toBe(true);
     expect(res.metrics.upliftVsBestOpeningPerKg).toBeGreaterThan(0);
+    expect(res.metrics.upliftVsChosenOpeningPerKg).toBeGreaterThan(0);
+    // ทุกข้อเสนอโต้กลับมีกลยุทธ์ เหตุผล และหลักฐาน
+    const counters = res.trace.filter((t) => t.type === 'counter_sent');
+    expect(counters.length).toBeGreaterThan(3);
+    expect(counters.every((c) => typeof c.data.strategy === 'string' && String(c.data.rationale).length > 0 && Array.isArray(c.data.evidence))).toBe(true);
+    expect(new Set(counters.map((c) => c.data.strategy)).size).toBeGreaterThanOrEqual(3); // ปรับกลยุทธ์ ไม่ใช้แบบเดียว
     expect(ledger.verify().ok).toBe(true);
     expect(ledger.list().length).toBe(res.trace.length);
   });
@@ -109,8 +118,15 @@ describe('Agent + LLM จำลอง: เจรจาครบวงจร', ()
     }
   });
 
-  it('มะระ: ไม่มีข้อเสนอผ่านขั้นต่ำทุกคน → ส่งเรื่องให้กลุ่ม ไม่ฝืนเตรียมดีล', async () => {
+  it('มะระ: ผู้ซื้อยอมขยับตามสัดส่วน → AI ยืนราคา + ตอบข้อกังวลด้วยหลักฐาน จนผ่านขั้นต่ำทุกคน', async () => {
     const res = await runNegotiation(input('bitter_gourd'), deps(), new RuleBasedMockLlm());
+    expect(res.outcome.kind).toBe('prepared');
+    expect(res.metrics.upliftVsChosenOpeningPerKg).toBeGreaterThan(1);
+  });
+
+  it('ขั้นต่ำสูงเกินกว่าที่ผู้ซื้อจ่ายได้ → ส่งเรื่องให้กลุ่ม ไม่ฝืนเตรียมดีล', async () => {
+    const high = listings.map((l) => (l.farmerId === 'F08' ? { ...l, floorPricePerKg: 25 } : l));
+    const res = await runNegotiation({ ...input('bitter_gourd'), listings: high }, deps(), new RuleBasedMockLlm());
     expect(res.status).toBe('failed');
     expect(res.outcome.kind).toBe('escalated');
   });
@@ -138,8 +154,8 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     let blocked: Record<string, unknown> | undefined;
     const llm = scripted([
       quoteA,
-      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 16.5, message: 'ขอ 16.50' })],
-      (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 16.5, message: 'ขอ 16.50' })],
+      (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     const res = await runNegotiation(input(), deps(spy), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'below_floor' });
@@ -152,8 +168,8 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     let blocked: Record<string, unknown> | undefined;
     const llm = scripted([
       quoteA,
-      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.5, message: 'สมาชิกบางคนรับได้ต่ำสุด 17.00 บาท' })],
-      (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.5, message: 'สมาชิกบางคนรับได้ต่ำสุด 17.00 บาท' })],
+      (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     await runNegotiation(input(), deps(), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'private_data_leak' });
@@ -163,8 +179,8 @@ describe('Guardrails: โค้ดคุม LLM', () => {
     let blocked: Record<string, unknown> | undefined;
     const llm = scripted([
       (req) => [tool('request_quote', { buyer_id: 'B-C' })],
-      (req) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-C'), price_per_kg: 18.3, message: 'ขอ 18.30' })],
-      (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-C'), price_per_kg: 18.3, message: 'ขอ 18.30' })],
+      (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'test' })]),
     ]);
     await runNegotiation(input(), deps(), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'below_buyer_offer' });
@@ -190,9 +206,9 @@ describe('Guardrails: โค้ดคุม LLM', () => {
 
   it('เจรจาเกินจำนวนรอบต่อผู้ซื้อ → บล็อก', async () => {
     let blocked: Record<string, unknown> | undefined;
-    const counter = (req: LlmRequest) => [tool('submit_counter', { session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอ 18.90' })];
+    const counter = (req: LlmRequest) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอ 18.90' })];
     // จำกัด 2 รอบ → ครั้งที่ 3 ต้องถูกบล็อก
-    const llm = scripted([quoteA, counter, counter, counter, (req) => ((blocked = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'x' })])]);
+    const llm = scripted([quoteA, counter, counter, counter, (req) => ((blocked ??= lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'x' })])]);
     await runNegotiation({ ...input(), maxRoundsPerBuyer: 2 }, deps(), llm);
     expect(blocked).toMatchObject({ blocked: true, code: 'round_limit' });
   });
@@ -221,11 +237,27 @@ describe('หยุดอย่างปลอดภัย', () => {
     expect(res.outcome).toMatchObject({ kind: 'failed', reason: expect.stringContaining('ครบจำนวนขั้น') });
   });
 
-  it('LLM ตอบแต่ข้อความ ไม่เลือกทำอะไร → เตือน 1 ครั้ง แล้วหยุด', async () => {
+  it('LLM ตอบแต่ข้อความ ไม่เลือกทำอะไร → เตือน 2 ครั้ง แล้วหยุด', async () => {
     const llm = scripted([() => [{ text: 'คิดอยู่…' }]]);
     const res = await runNegotiation(input(), deps(), llm);
-    expect(llm.calls).toBe(2);
+    expect(llm.calls).toBe(3);
     expect(res.outcome).toMatchObject({ kind: 'failed', reason: expect.stringContaining('ไม่ได้เลือก') });
+  });
+
+  it('ตอบเป็นข้อความล้วนแล้วถูกเตือน → บอกผู้ซื้อที่ยังไม่ได้ขอใบเสนอราคา และทำต่อได้', async () => {
+    let nudge = '';
+    const llm = scripted([
+      () => [tool('request_quote', { buyer_id: 'B-A' })],
+      () => [{ text: 'B-A ไม่ผ่าน จะขอจากรายอื่นต่อ' }], // เขียนแผนแต่ไม่เรียก tool
+      (req) => ((nudge = req.messages.at(-1)!.content.map((b) => ('text' in b ? b.text : '')).join(' ')), [tool('request_quote', { buyer_id: 'B-C' })]),
+      () => [tool('escalate_to_farmers', { reason: 'test' })],
+    ]);
+    const res = await runNegotiation(input(), deps(), llm);
+    expect(nudge).toContain('ต้องจบด้วยการเรียก tool');
+    expect(nudge).toContain('B-B');
+    expect(nudge).toContain('B-C');
+    expect(nudge).not.toMatch(/ผู้ซื้อที่ยังไม่ได้ขอใบเสนอราคา: [^\n]*B-A/);
+    expect(res.outcome.kind).toBe('escalated');
   });
 });
 
@@ -242,5 +274,70 @@ describe('ส่วนประกอบย่อย', () => {
     expect(extractNumbers('รวม 41,500 กก. ราคา 17.65')).toEqual([41500, 17.65]);
     expect(checkMessageLeak('ราคาตลาด 17.65', [17.65], [17.65])).toBeUndefined();
     expect(checkMessageLeak('ต่ำสุด 17', [17.0])).toMatchObject({ code: 'private_data_leak' });
+  });
+});
+
+describe('งบขั้นตอนของ Agent (เจอจริงบน Nova: ค้นข้อมูลวนจนหมด 14 ขั้นโดยไม่ได้สรุป)', () => {
+  const noteOf = (req: LlmRequest) =>
+    req.messages
+      .at(-1)!
+      .content.filter((b): b is { text: string } => 'text' in b)
+      .map((b) => b.text)
+      .join(' ');
+
+  it('ค้นความรู้ได้ไม่เกิน 3 ครั้ง ครั้งที่ 4 ได้ error ที่บอกให้ไปต่อ (ขั้นยังเหลือสำหรับเจรจา)', async () => {
+    const results: Record<string, unknown>[] = [];
+    const search = (q: string) => (req: LlmRequest) => (req.messages.length > 1 && results.push(lastResults(req)[0]!), [tool('search_knowledge', { query: q })]);
+    const llm = scripted([search('a'), search('b'), search('c'), search('d'), (req) => (results.push(lastResults(req)[0]!), [tool('escalate_to_farmers', { reason: 'test' })])]);
+    await runNegotiation(input(), deps(), llm);
+    expect(results.slice(0, 3).every((r) => Array.isArray(r.results))).toBe(true);
+    expect(String(results[3]!.error)).toContain('ครบ 3 ครั้งแล้ว');
+  });
+
+  it('บอกจำนวนขั้นที่เหลือทุกขั้น และเมื่อเหลือ ≤ 3 ให้สั่งสรุปทันที', async () => {
+    const notes: string[] = [];
+    const step = (req: LlmRequest) => (req.messages.length > 1 && notes.push(noteOf(req)), [tool('list_buyers')]);
+    const llm = scripted([step, step, step, step, step, step]);
+    const res = await runNegotiation(input(), deps(), llm, { limits: { maxSteps: 6 } });
+    expect(res.status).toBe('failed');
+    expect(notes[0]).toContain('ใช้ไป 1/6 ขั้น เหลืออีก 5 ขั้น');
+    expect(notes[1]).toContain('ใช้ไป 2/6 ขั้น เหลืออีก 4 ขั้น');
+    expect(notes[2]).toContain('เหลืออีก 3 ขั้น ต้องสรุปตอนนี้');
+    expect(notes[2]).toContain('prepare_deal_for_approval');
+  });
+
+  it('ค่าเริ่มต้น 18 ขั้น', async () => {
+    const { DEFAULT_LIMITS } = await import('../src/agent/index.js');
+    expect(DEFAULT_LIMITS.maxSteps).toBe(18);
+  });
+});
+
+describe('กันส่งเรื่องให้เกษตรกรก่อนต่อรอง (เจอจริงบน Nova)', () => {
+  it('ขอใบเสนอราคาแล้ว escalate ทันที → บล็อกครั้งแรกพร้อมบอกรายที่ยังไม่ได้ต่อรอง, ครั้งที่สองยอมให้ส่ง', async () => {
+    let first: Record<string, unknown> | undefined;
+    const llm = scripted([
+      () => [tool('request_quote', { buyer_id: 'B-A' }), tool('request_quote', { buyer_id: 'B-C' })],
+      () => [tool('escalate_to_farmers', { reason: 'ต่ำกว่าขั้นต่ำ' })],
+      (req) => ((first = lastResults(req)[0]), [tool('escalate_to_farmers', { reason: 'ต่ำกว่าขั้นต่ำ' })]),
+    ]);
+    const res = await runNegotiation(input(), deps(), llm);
+    expect(String(first?.error)).toContain('ยังไม่ได้ต่อรอง');
+    expect(String(first?.error)).toContain('B-C');
+    expect(res.outcome.kind).toBe('escalated');
+  });
+
+  it('ต่อรองแล้วอย่างน้อยหนึ่งรอบกับทุกรายที่เปิดอยู่ → escalate ได้เลย', async () => {
+    const llm = scripted([
+      () => [tool('request_quote', { buyer_id: 'B-A' })],
+      (req) => [tool('submit_counter', { strategy: 'anchor', rationale: 'test', evidence_ids: [], session_id: sessionIdOf(req, 'B-A'), price_per_kg: 18.9, message: 'ขอราคาตามตลาด' })],
+      () => [tool('escalate_to_farmers', { reason: 'test' })],
+    ]);
+    const res = await runNegotiation(input(), deps(), llm);
+    expect(res.outcome.kind).toBe('escalated');
+  });
+
+  it('งบ token เริ่มต้นพอสำหรับ 18 ขั้น', async () => {
+    const { DEFAULT_LIMITS } = await import('../src/agent/index.js');
+    expect(DEFAULT_LIMITS.maxTotalTokens).toBeGreaterThanOrEqual(250_000);
   });
 });

@@ -12,7 +12,8 @@
     "agent:demo": "tsx scripts/demo.ts",
     "demo:export": "tsx scripts/export-demo.ts",
     "build:assets": "tsx scripts/gen-assets.ts && tsx scripts/export-demo.ts",
-    "dev": "tsx scripts/local-server.ts"
+    "dev": "tsx scripts/local-server.ts",
+    "eval": "tsx scripts/eval.ts"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +30,7 @@
     "@aws-sdk/client-bedrock-runtime": "^3.1153.0",
     "@aws-sdk/client-dynamodb": "^3.1154.0",
     "@aws-sdk/client-lambda": "^3.1154.0",
+    "@aws-sdk/client-ssm": "^3.1156.0",
     "@aws-sdk/lib-dynamodb": "^3.1154.0",
     "esbuild": "^0.25.10"
   }

@@ -92,7 +92,7 @@ describe('การจับกลุ่ม (ข้อมูลจำลอง)'
     const rice = groups.find((g) => g.crop === 'rice_hommali' && g.grade === 'A')!;
     expect(rice.members.map((m) => m.farmerId).sort()).toEqual(['F01', 'F02', 'F03', 'F04']);
     expect(groups.some((g) => g.members.some((m) => m.farmerId === 'F05'))).toBe(false); // เกรด B คนเดียว
-    expect(groups.map((g) => g.crop).sort()).toEqual(['bitter_gourd', 'cassava', 'rice_hommali']);
+    expect(groups.map((g) => g.crop).sort()).toEqual(['bitter_gourd', 'cassava', 'corn', 'rice_hommali', 'rubber']);
   });
 
   it('แยกกลุ่มเมื่อวันส่งมอบห่างเกินช่วงที่กำหนด', () => {
@@ -146,5 +146,40 @@ describe('Ledger', () => {
     const tampered = l.list().map((e, i) => (i === 0 ? { ...e, data: { pricePerKg: 15 } } : e));
     expect(l.verify(tampered)).toEqual({ ok: false, brokenAt: 1 });
     expect(() => ((l.list()[0] as { type: string }).type = 'x')).toThrow();
+  });
+});
+
+describe('Ledger: hash ไม่ขึ้นกับลำดับคีย์ (เจอจริงบน DynamoDB ที่ไม่รักษาลำดับคีย์ของ map)', () => {
+  const reverseKeys = (v: unknown): unknown =>
+    Array.isArray(v) ? v.map(reverseKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).reverse().map(([k, x]) => [k, reverseKeys(x)])) : v;
+
+  const build = () => {
+    const l = new Ledger(() => new Date('2026-10-23T00:00:00Z'));
+    l.append({ dealId: 'D', actor: 'agent', type: 'agent.plan', data: { zeta: 1, alpha: { y: 2, x: [{ b: 1, a: 2 }] }, mid: 'x' } });
+    l.append({ dealId: 'D', actor: 'farmer', actorId: 'F01', type: 'approval.approve', data: { farmerId: 'F01', decision: 'approve' } });
+    return l;
+  };
+
+  it('อ่านกลับจากฐานข้อมูลที่คีย์สลับลำดับ แล้วยังตรวจผ่านและต่อท้ายได้', () => {
+    const stored = build().list().map((e) => ({ ...e, data: reverseKeys(e.data) as Record<string, unknown> }));
+    const l = Ledger.from(stored, () => new Date('2026-10-23T00:00:00Z'));
+    expect(l.verify().ok).toBe(true);
+    expect(() => l.append({ dealId: 'D', actor: 'system', type: 'deal.agreed', data: {} })).not.toThrow();
+  });
+
+  it('ยังจับการแก้ไขข้อมูลได้เหมือนเดิม', () => {
+    const stored = build().list().map((e) => ({ ...e, data: reverseKeys(e.data) as Record<string, unknown> }));
+    stored[0] = { ...stored[0]!, data: { ...stored[0]!.data, zeta: 999 } };
+    expect(() => Ledger.from(stored)).toThrow('hash chain');
+  });
+});
+
+describe('ตรวจความผิดปกติก่อนปิดดีล', () => {
+  it('ราคาต่ำกว่าตลาดมาก ส่วนหักเกิน 3% เครดิตนาน ผู้ซื้อประวัติไม่ดี → เตือนทุกข้อ · ดีลปกติ → ผ่านหมด', async () => {
+    const { checkDealAnomalies } = await import('../src/core/anomaly.js');
+    const bad = checkDealAnomalies({ pricePerKg: 14, marketMedianPerKg: 17.8, deductions: [{ kind: 'percent', label: 'หักความชื้น', percent: 4 }], totalKg: 40_000, paymentTermDays: 30, buyerMinKg: 10_000, passesAllFloors: false, buyerLevel: 'low', ledgerVerified: true });
+    expect(bad.filter((c) => !c.ok).map((c) => c.label)).toEqual(['ราคาเทียบตลาด', 'ส่วนหักแฝง', 'เครดิตจ่ายเงิน', 'ราคาขั้นต่ำของสมาชิก', 'ประวัติผู้ซื้อ']);
+    const good = checkDealAnomalies({ pricePerKg: 17.9, marketMedianPerKg: 17.8, deductions: [], totalKg: 40_000, paymentTermDays: 7, buyerMinKg: 10_000, passesAllFloors: true, buyerLevel: 'high', ledgerVerified: true });
+    expect(good.every((c) => c.ok)).toBe(true);
   });
 });
