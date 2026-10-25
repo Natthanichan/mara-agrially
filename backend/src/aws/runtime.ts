@@ -24,7 +24,7 @@ const chat = env.LLM_PROVIDER === 'bedrock' && env.BEDROCK_MODEL_ID ? new Bedroc
 
 export const ctx: AppContext = {
   // อ่าน secret จาก SSM ตอนมีคำขอแรกเท่านั้น (ถ้ายังไม่ตั้งค่า ส่วนอื่นของระบบยังทำงานได้)
-  line: new LineBot(() => ctx, secretsLoader(env)),
+  line: new LineBot(() => ctx, secretsLoader(env), undefined, { pushEnabled: env.LINE_PUSH !== 'off' }),
   store: new DynamoDealStore(db, table),
   dailyLimit: Number(env.DAILY_NEGOTIATION_LIMIT ?? 60),
   chatLlm: () => chat,

@@ -12,7 +12,7 @@ import { FEEDBACK_TH, LEVEL_TH, type FeedbackKind } from '../core/reputation.js'
 
 export const MOCK_NOTE = 'ข้อมูลทั้งหมดเป็นการจำลองเพื่อทดสอบระบบ ไม่ใช่ราคาหรือดีลจริง';
 
-const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other', 'farm_sell', 'farm_plan', 'farm_profile', 'plan_crop', 'plan_advise', 'farm_sell_profile', 'rate_buyer', 'group_vote'] as const;
+const ACTS = ['confirm', 'edit', 'approve', 'reject', 'renegotiate', 'role_farmer', 'role_buyer', 'buyer_crop', 'buyer_confirm', 'buyer_edit', 'group_join', 'group_create', 'group_auto', 'buyer_negotiate', 'buyer_accept', 'buyer_end', 'buyer_deal_confirm', 'buyer_deal_back', 'buyer_end_confirm', 'buyer_crop_other', 'farm_sell', 'farm_plan', 'farm_profile', 'plan_crop', 'plan_advise', 'farm_sell_profile', 'rate_buyer', 'group_vote', 'check_result'] as const;
 export type Act = (typeof ACTS)[number];
 const CROPS: Crop[] = ALL_CROPS;
 export const postbackData = (act: Act, dealId?: string, crop?: Crop, value?: string) =>
@@ -188,7 +188,18 @@ export function failedMessage(dealId: string, reason: string, canRetry: boolean)
   return [msg, bubble('อยากลองอีกครั้งไหม', [{ type: 'text', text: 'กดต่อรองใหม่เพื่อให้น้องมะระเจรจาใหม่ หรือพิมพ์ผลผลิตใหม่ (เช่น ปรับราคาขั้นต่ำ) ได้เลย', size: 'sm', wrap: true }], [button('ต่อรองใหม่', postbackData('renegotiate', dealId), 'ต่อรองใหม่', 'primary', '#2E7D32')], 'ยังไม่ได้ดีล กดต่อรองใหม่หรือพิมพ์ผลผลิตใหม่')];
 }
 
-export const startedMessage = () => text('รับทราบค่ะ น้องมะระเริ่มเจรจากับผู้ซื้อแล้ว 🤝\nใช้เวลาประมาณ 1–2 นาที พอมีผลหนูจะส่งให้คุณดูครั้งเดียว พร้อมปุ่มอนุมัติค่ะ');
+/** ปุ่มลัด "ดูผลเจรจา" (reply ฟรี ไม่นับโควตา push) */
+export const checkResultMessage = (t: string): LineMessage => ({
+  ...text(t),
+  quickReply: { items: [{ type: 'action', action: { type: 'postback', label: 'ดูผลเจรจา', data: postbackData('check_result'), displayText: 'ดูผลเจรจา' } }] },
+});
+
+export const startedMessage = (push = true) =>
+  checkResultMessage(
+    push
+      ? 'รับทราบค่ะ น้องมะระเริ่มเจรจากับผู้ซื้อแล้ว 🤝\nใช้เวลาประมาณ 1–2 นาที พอมีผลหนูจะส่งให้คุณดูครั้งเดียว พร้อมปุ่มอนุมัติค่ะ (ถ้ายังไม่เห็น กด “ดูผลเจรจา” ได้เลย)'
+      : 'รับทราบค่ะ น้องมะระเริ่มเจรจากับผู้ซื้อแล้ว 🤝\nใช้เวลาประมาณ 1–2 นาที แล้วกด “ดูผลเจรจา” ด้านล่าง หรือพิมพ์ “สถานะ” เพื่อดูผลพร้อมปุ่มอนุมัติค่ะ',
+  );
 
 // ---------- เลือกบทบาท และฝั่งผู้ซื้อ ----------
 

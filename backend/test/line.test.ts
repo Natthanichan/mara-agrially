@@ -126,7 +126,7 @@ describe('LINE client / secrets', () => {
 
 type Sent = { kind: 'reply' | 'push'; to: string; messages: LineMessage[] };
 
-function setup(opts: { dailyLimit?: number } = {}) {
+function setup(opts: { dailyLimit?: number; push?: boolean } = {}) {
   const store = new MemoryDealStore();
   const sent: Sent[] = [];
   const client = {
@@ -144,7 +144,7 @@ function setup(opts: { dailyLimit?: number } = {}) {
     invokeWorker: async (id) => {
       await runDeal(ctx, id);
     },
-    line: new LineBot(() => ctx, async () => ({ channelSecret: SECRET, channelAccessToken: TOKEN }), () => client),
+    line: new LineBot(() => ctx, async () => ({ channelSecret: SECRET, channelAccessToken: TOKEN }), () => client, { pushEnabled: opts.push !== false }),
   };
   let e = 0;
   const post = async (events: unknown[]) => {
@@ -250,6 +250,23 @@ describe('บทสนทนา LINE ตั้งแต่พิมพ์ผล�
     expect(approvals.find((e) => e.data.farmerId === 'F01')!.data.simulated).toBeUndefined();
     expect(approvals.filter((e) => e.data.simulated === true).map((e) => e.data.farmerId).sort()).toEqual(['F02', 'F03', 'F04']);
     void ctx;
+  });
+
+  it('ปิด push (ประหยัดโควตา LINE OA) → ไม่ส่ง push เลย · กด "ดูผลเจรจา" หรือพิมพ์ "สถานะ" ได้การ์ดอนุมัติทาง reply แล้วอนุมัติได้ตามปกติ', async () => {
+    const { say, tap, sent, store, last } = setup({ push: false });
+    await say(ROOF);
+    await tap(postbackData('confirm'));
+    expect(sent.filter((s) => s.kind === 'push')).toHaveLength(0);
+    expect(asText(last().messages.at(-1)!)).toContain('ดูผลเจรจา');
+    await tap(postbackData('check_result'));
+    const offer = last().messages[0]!;
+    expect(last().kind).toBe('reply');
+    expect(buttons(offer).map((b) => b.label)).toEqual(['อนุมัติ', 'ไม่เอา', 'ต่อรองใหม่']);
+    await say('สถานะ');
+    expect(buttons(last().messages[0]!).map((b) => b.label)).toContain('อนุมัติ');
+    await tap(buttons(offer)[0]!.data);
+    expect((await store.getDeal('deal-1'))!.status).toBe('agreed');
+    expect(sent.filter((s) => s.kind === 'push')).toHaveLength(0);
   });
 
   it('กดยืนยันซ้ำ/ส่ง event ซ้ำ → ไม่เกิดสองดีล', async () => {

@@ -20,6 +20,11 @@ Parameters:
     MinValue: 1
     MaxValue: 500
     Description: Max negotiations per day (caps Bedrock spend on a public URL)
+  LinePush:
+    Type: String
+    Default: 'off'
+    AllowedValues: ['on', 'off']
+    Description: on = push results/buyer alerts (counts toward the LINE OA monthly message quota) · off = users tap "ดูผลเจรจา" (reply messages are free)
   LineChannelSecretParam:
     Type: String
     Default: /mara-agrially/line/channel-secret
@@ -42,6 +47,7 @@ Globals:
         DAILY_NEGOTIATION_LIMIT: !Ref DailyNegotiationLimit
         AGENT_MAX_ROUNDS: '5'
         CHAT_DAILY_LIMIT: '300'
+        LINE_PUSH: !Ref LinePush
         LINE_SECRET_PARAM: !Ref LineChannelSecretParam
         LINE_TOKEN_PARAM: !Ref LineChannelAccessTokenParam
         NABC_TIMEOUT_MS: '5000'

@@ -81,6 +81,7 @@ import {
   rateBuyerMessage,
   paymentSplitMessage,
   groupVoteMessage,
+  checkResultMessage,
 } from './flex.js';
 import { FEEDBACK_TH, reputationLine, type FeedbackKind } from '../core/reputation.js';
 import { expectedYieldKg, monthTh, parseRai, recommendCrops, upcomingMonths, type FarmProfile, type Soil } from '../core/farmProfile.js';
@@ -169,7 +170,13 @@ export class LineBot implements LineHooks {
     private getCtx: () => AppContext,
     private secrets: () => Promise<LineSecrets>,
     private makeClient: (token: string) => Pick<LineClient, 'reply' | 'push'> = (t) => new LineClient(t),
+    /** pushEnabled=false: ไม่ใช้ push (นับโควตาข้อความรายเดือนของ LINE OA) ผู้ใช้กด "ดูผลเจรจา" แทน ซึ่งเป็น reply ฟรี */
+    private opts: { pushEnabled?: boolean } = {},
   ) {}
+
+  private get pushEnabled() {
+    return this.opts.pushEnabled !== false;
+  }
 
   /** URL ของระบบจาก webhook ล่าสุด (Lambda ประมวลผลทีละคำขอต่อ container จึงเก็บไว้ที่นี่ได้) */
   private baseUrl: string | undefined;
@@ -257,10 +264,7 @@ export class LineBot implements LineHooks {
     if (session?.awaiting === 'group_code') return this.onGroupCode(userId, t, reply);
     if (session?.awaiting === 'group_name') return this.onGroupName(userId, t, reply);
 
-    if (STATUS.test(t)) {
-      const deal = session?.lastDealId ? await store.getDeal(session.lastDealId) : undefined;
-      return reply([text(deal ? `ดีลล่าสุดของคุณ: ${STATUS_TH[deal.status] ?? deal.status}` : 'ยังไม่มีดีลค่ะ พิมพ์ผลผลิตของคุณมาได้เลย')]);
-    }
+    if (STATUS.test(t)) return this.replyResult(session, reply);
     // พิมพ์ผลผลิตครบในรูปแบบที่อ่านได้ → ไปขั้นยืนยันเลย (เร็ว ไม่ต้องเรียก AI)
     const r = parseListing(t);
     if (r.ok) return this.acceptListing(userId, session, r.draft, r.gradeAssumed, reply, r.cropNote);
@@ -846,6 +850,8 @@ export class LineBot implements LineHooks {
       return reply(buyerMatchesMessages(full, groupsFor(full.crop)));
     }
 
+    if (pb.act === 'check_result') return this.replyResult(await store.getLineSession(userId), reply);
+
     if (pb.act === 'edit') {
       await this.save(userId, { draft: undefined });
       return reply([text('ได้ค่ะ พิมพ์ผลผลิตใหม่ได้เลย เช่น “ข้าวหอมมะลิ 12 ตัน เกรด A ขั้นต่ำ 17 บาท/กก.”')]);
@@ -866,7 +872,7 @@ export class LineBot implements LineHooks {
         await this.save(userId, { draft }); // ให้กดยืนยันซ้ำได้ (เช่น โควตาเต็ม)
         throw e;
       }
-      await reply([...(await this.groupSummary(dealId, session)), startedMessage()]);
+      await reply([...(await this.groupSummary(dealId, session)), startedMessage(this.pushEnabled)]);
       await this.alertBuyers(dealId, userId, client);
       return;
     }
@@ -880,7 +886,7 @@ export class LineBot implements LineHooks {
     if (pb.act === 'renegotiate') {
       const { id } = await renegotiate(ctx, pb.dealId, userId, this.baseUrl);
       await this.save(userId, { lastDealId: id });
-      return reply([text('ได้ค่ะ น้องมะระเริ่มเจรจาใหม่ให้แล้ว 🔁 ใช้เวลาประมาณ 1–2 นาที หนูจะส่งผลให้ดูอีกครั้ง')]);
+      return reply([checkResultMessage(`ได้ค่ะ น้องมะระเริ่มเจรจาใหม่ให้แล้ว 🔁 ใช้เวลาประมาณ 1–2 นาที ${this.pushEnabled ? 'หนูจะส่งผลให้ดูอีกครั้ง (หรือกด “ดูผลเจรจา”)' : 'แล้วกด “ดูผลเจรจา” ด้านล่างนะคะ'}`)]);
     }
 
     if (pb.act === 'group_vote') {
@@ -942,6 +948,7 @@ export class LineBot implements LineHooks {
 
   /** มีกลุ่มเกษตรกรพร้อมขาย → แจ้งผู้ซื้อที่มีคำขอซื้อพืชนี้เปิดอยู่ (คนละ 1 ข้อความ) — ล้มเหลวได้โดยไม่กระทบเกษตรกร */
   private async alertBuyers(dealId: string, farmerUserId: string, client: Pick<LineClient, 'push'>) {
+    if (!this.pushEnabled) return;
     try {
       const ctx = this.getCtx();
       const v = await getDeal(ctx, dealId);
@@ -981,13 +988,11 @@ export class LineBot implements LineHooks {
     return r.needsRenegotiation ? [msg, ...failedMessage(dealId, r.reason ?? 'ต้องเจรจาใหม่', true).slice(1)] : [msg];
   }
 
-  /** worker เรียกเมื่อเจรจาเสร็จ — push ผลหาเกษตรกรครั้งเดียว (ดีลที่ไม่ได้เริ่มจาก LINE ไม่ทำอะไร) */
-  async notifyDealReady(dealId: string): Promise<void> {
+  /** ข้อความผลเจรจาของดีลนี้ (การ์ดอนุมัติ / แจ้งเจรจาไม่สำเร็จ + ขอมติกลุ่ม) · undefined = ยังเจรจาอยู่ */
+  private async resultMessages(dealId: string): Promise<LineMessage[] | undefined> {
     const ctx = this.getCtx();
     const deal = await ctx.store.getDeal(dealId);
-    if (!deal?.lineUserId || !deal.lineFarmerId) return;
-    const { channelAccessToken } = await this.secrets();
-    const client = this.makeClient(channelAccessToken);
+    if (!deal?.lineUserId || !deal.lineFarmerId) return undefined;
     if (deal.status === 'pending_approval' && deal.outcome?.kind === 'prepared') {
       const offer = await getFarmerOffer(ctx, dealId, deal.lineFarmerId);
       const others = offer.group.memberCount - 1;
@@ -998,13 +1003,34 @@ export class LineBot implements LineHooks {
         blocks: events.filter((e) => e.type === 'agent.guardrail_blocked').length,
         ...(deal.lineBaseUrl ? { detailsUrl: `${deal.lineBaseUrl.replace(/\/?$/, '/')}?deal=${encodeURIComponent(dealId)}` } : {}),
       };
-      await client.push(deal.lineUserId, [offerMessage(dealId, offer, `เพื่อนในกลุ่มอีก ${others} คนเป็นตัวจำลอง จะอนุมัติให้อัตโนมัติเมื่อคุณกดตอบ`, extras)]);
-    } else if (deal.status === 'failed') {
-      const reason = deal.outcome && 'reason' in deal.outcome ? deal.outcome.reason : (deal.error ?? 'ไม่ทราบสาเหตุ');
-      const best = deal.outcome?.kind === 'escalated' ? deal.outcome.bestOffer : undefined;
-      const vote = best && best.evaluation.membersBelowFloor > 0 && best.evaluation.membersBelowFloor < groupSize(best) ? [groupVoteMessage(dealId, best.buyerName, best.terms.pricePerKg, best.evaluation.membersBelowFloor, groupSize(best))] : [];
-      await client.push(deal.lineUserId, [...failedMessage(dealId, reason, (deal.round ?? 0) < MAX_LINE_ROUNDS), ...vote].slice(0, 5));
+      return [offerMessage(dealId, offer, `เพื่อนในกลุ่มอีก ${others} คนเป็นตัวจำลอง จะอนุมัติให้อัตโนมัติเมื่อคุณกดตอบ`, extras)];
     }
+    if (deal.status === 'failed') {
+      const reason = deal.outcome && 'reason' in deal.outcome ? deal.outcome.reason : (deal.error ?? 'ไม่ทราบสาเหตุ');
+      const best = deal.outcome?.kind === 'escalated' && !deal.groupVote ? deal.outcome.bestOffer : undefined;
+      const vote = best && best.evaluation.membersBelowFloor > 0 && best.evaluation.membersBelowFloor < groupSize(best) ? [groupVoteMessage(dealId, best.buyerName, best.terms.pricePerKg, best.evaluation.membersBelowFloor, groupSize(best))] : [];
+      return [...failedMessage(dealId, reason, (deal.round ?? 0) < MAX_LINE_ROUNDS), ...vote].slice(0, 5);
+    }
+    if (deal.status === 'queued' || deal.status === 'negotiating') return undefined;
+    return [text(`ดีลล่าสุดของคุณ: ${STATUS_TH[deal.status] ?? deal.status}`)];
+  }
+
+  /** ผู้ใช้กด "ดูผลเจรจา" หรือพิมพ์ "สถานะ" → ตอบด้วย reply (ไม่นับโควตา push) */
+  private async replyResult(session: LineSession | undefined, reply: (m: LineMessage[]) => Promise<void>) {
+    if (!session?.lastDealId) return reply([text('ยังไม่มีดีลค่ะ พิมพ์ผลผลิตของคุณมาได้เลย')]);
+    const msgs = await this.resultMessages(session.lastDealId);
+    return reply(msgs ?? [checkResultMessage('น้องมะระยังเจรจาอยู่ค่ะ ⏳ ปกติใช้เวลา 1–2 นาที อีกสักครู่กด “ดูผลเจรจา” อีกครั้งนะคะ')]);
+  }
+
+  /** worker เรียกเมื่อเจรจาเสร็จ — push ผลหาเกษตรกรครั้งเดียว (ปิด push ได้ เพื่อประหยัดโควตา LINE OA) */
+  async notifyDealReady(dealId: string): Promise<void> {
+    if (!this.pushEnabled) return;
+    const deal = await this.getCtx().store.getDeal(dealId);
+    if (!deal?.lineUserId) return;
+    const msgs = await this.resultMessages(dealId);
+    if (!msgs) return;
+    const { channelAccessToken } = await this.secrets();
+    await this.makeClient(channelAccessToken).push(deal.lineUserId, msgs);
   }
 
   private async safeReply(client: Pick<LineClient, 'reply'>, token: string | undefined, messages: LineMessage[]) {
