@@ -22,7 +22,7 @@ Parameters:
     Description: Max negotiations per day (caps Bedrock spend on a public URL)
   LinePush:
     Type: String
-    Default: 'off'
+    Default: 'on'
     AllowedValues: ['on', 'off']
     Description: on = push results/buyer alerts (counts toward the LINE OA monthly message quota) · off = users tap "ดูผลเจรจา" (reply messages are free)
   LineChannelSecretParam:
